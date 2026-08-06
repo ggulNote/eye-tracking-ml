@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import uuid
 from pathlib import Path
 from types import TracebackType
@@ -145,6 +146,9 @@ class MlflowRunTracker(RunTracker):
         mlflow.pyfunc.log_model(**kwargs)
 
     def _tracking_uri(self) -> str:
+        environment_uri = os.environ.get("MLFLOW_TRACKING_URI", "").strip()
+        if environment_uri:
+            return environment_uri
         prefix = "sqlite:///"
         if not self.config.tracking_uri.startswith(prefix):
             return self.config.tracking_uri

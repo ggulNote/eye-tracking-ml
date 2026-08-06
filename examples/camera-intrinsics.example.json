@@ -1,0 +1,10 @@
+{
+  "image_width_px": 1920,
+  "image_height_px": 1080,
+  "camera_matrix": [
+    [1200.0, 0.0, 960.0],
+    [0.0, 1200.0, 540.0],
+    [0.0, 0.0, 1.0]
+  ],
+  "distortion_coefficients": [0.0, 0.0, 0.0, 0.0, 0.0]
+}
