@@ -4,7 +4,7 @@ CONFIG ?= configs/base.yaml
 MODEL ?=
 PREPROCESS_FLAGS ?=
 
-.PHONY: setup setup-video validate preprocess smoke train evaluate predict test mlflow
+.PHONY: setup setup-video validate preprocess smoke train evaluate predict test check mlflow
 
 setup:
 	python3 -m venv .venv
@@ -38,6 +38,8 @@ predict:
 
 test:
 	$(PYTHON) -m pytest
+
+check: validate test smoke
 
 mlflow:
 	.venv/bin/mlflow server \
