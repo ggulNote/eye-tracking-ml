@@ -3,31 +3,30 @@ project:
   task: gaze_coordinate_regression
 
 data:
-  source: synthetic
-  manifest_path: null
-  dataset_version: synthetic-v001
+  source: manifest
+  manifest_path: manifests/manifest.csv
+  dataset_version: dataset-v001
   processed_dir: processed
-  train_from_processed: false
-  num_samples: 96
-  num_participants: 12
-  sequence_length: 4
+  train_from_processed: true
+  num_samples: 0
+  num_participants: 0
+  sequence_length: 1
   frame_stride: 1
-  raw_height: 32
-  raw_width: 48
+  raw_height: 720
+  raw_width: 1280
   train_fraction: 0.67
   validation_fraction: 0.17
   test_fraction: 0.16
 
+# Keep a useful full frame for the future MediaPipe processor. This is not the
+# 128x512 eye patch; that model-specific processor is intentionally still TODO.
 preprocessing:
   color_mode: rgb
-  output_height: 24
-  output_width: 32
-  mean: [0.5, 0.5, 0.5]
-  std: [0.5, 0.5, 0.5]
+  output_height: 720
+  output_width: 1280
+  mean: [0.0, 0.0, 0.0]
+  std: [1.0, 1.0, 1.0]
 
-# Future WebEyeTrack processor/model boundary. The current baseline does not
-# generate these tensors; it validates the exact interface the implementation
-# must produce later.
 model_io:
   profile: webeyetrack_v1
   image_height: 128
@@ -44,13 +43,15 @@ model_io:
   output_coordinate_space: screen_centered_normalized
   support_size: 9
 
+# Lightweight placeholder so the local raw->processed->train workflow can be
+# tested before BlazeGaze is added.
 feature_extraction:
-  name: identity
+  name: spatial_statistics
   version: v1
 
 model:
   name: ridge
-  version: v1
+  version: local-placeholder-v1
   alpha: 1.0
 
 training:
@@ -66,5 +67,5 @@ mlflow:
   enabled: true
   tracking_uri: sqlite:///mlflow.db
   experiment_name: ggulnote-gaze
-  registered_model_name: ggulnote-gaze-ridge
-  run_name: synthetic-ridge-baseline
+  registered_model_name: ggulnote-gaze-local-placeholder
+  run_name: local-manifest-placeholder

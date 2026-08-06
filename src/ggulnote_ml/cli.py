@@ -8,7 +8,13 @@ from typing import Optional, Sequence
 
 from ggulnote_ml.config import load_config
 from ggulnote_ml.exceptions import PipelineError
-from ggulnote_ml.pipelines import run_evaluation, run_prediction, run_training
+from ggulnote_ml.pipelines import (
+    run_evaluation,
+    run_prediction,
+    run_preprocessing,
+    run_training,
+)
+from ggulnote_ml.settings import load_project_env, resolve_data_root
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,6 +23,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate_parser = subparsers.add_parser("validate-config", help="Validate config schema.")
     _add_config_argument(validate_parser)
+
+    preprocess_parser = subparsers.add_parser(
+        "preprocess", help="Build a versioned processed dataset in GGULNOTE_DATA_ROOT."
+    )
+    _add_config_argument(preprocess_parser)
+    preprocess_parser.add_argument("--force", action="store_true")
 
     train_parser = subparsers.add_parser("train", help="Train and log an experiment.")
     _add_config_argument(train_parser)
@@ -40,11 +52,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         loaded = load_config(args.config)
+        load_project_env(loaded.project_root)
         if args.command == "validate-config":
+            data_root = resolve_data_root(loaded.project_root, required=False)
             payload = {
                 "status": "ok",
                 "config": str(loaded.source_path),
                 "project_root": str(loaded.project_root),
+                "data_root": str(data_root) if data_root is not None else None,
+            }
+        elif args.command == "preprocess":
+            result = run_preprocessing(
+                loaded.config, loaded.project_root, force=args.force
+            )
+            payload = {
+                "status": "ok",
+                "dataset_dir": str(result.dataset_dir),
+                "dataset": result.metadata,
             }
         elif args.command == "train":
             result = run_training(loaded.config, loaded.project_root)
@@ -79,4 +103,3 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

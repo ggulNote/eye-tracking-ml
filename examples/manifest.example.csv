@@ -1,4 +1,4 @@
-video_path,source,participant_id,session_id,target_x,target_y,rotation_degrees
-../data/raw/webcam/person-001/session-001.mp4,webcam,person-001,session-001,0.25,0.40,0
-../data/raw/phone/person-002/session-001.mp4,phone,person-002,session-001,0.70,0.65,90
-
+sample_id,video_path,source,participant_id,session_id,device_id,label_timestamp_ms,label_frame_index,target_x,target_y,target_coordinate_space,screen_width_px,screen_height_px,screen_width_cm,screen_height_cm,rotation_degrees,camera_intrinsics_path,calibration_point_id,sample_weight,valid
+p001-s001-calib-01,../raw/webcam/person-001/session-001.mp4,webcam,person-001,session-001,laptop-a,1000,,0.25,0.40,top_left_normalized,1920,1080,53.1,29.8,0,,grid-01,1.0,true
+p001-s001-calib-02,../raw/webcam/person-001/session-001.mp4,webcam,person-001,session-001,laptop-a,2000,,0.50,0.50,top_left_normalized,1920,1080,53.1,29.8,0,,grid-05,1.0,true
+p002-s001-calib-01,../raw/phone/person-002/session-001.mp4,phone,person-002,session-001,phone-a,,90,1170,455,screen_pixels,1170,2532,6.5,14.1,90,,grid-01,1.0,true

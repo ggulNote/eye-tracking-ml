@@ -1,5 +1,6 @@
 .DS_Store
 .venv/
+.env
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -17,3 +18,8 @@ mlruns/
 mlartifacts/
 mlflow.db
 
+# Raw recordings must stay in the external local data root.
+*.mp4
+*.mov
+*.avi
+*.mkv

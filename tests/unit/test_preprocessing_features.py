@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -24,3 +25,19 @@ def test_preprocessing_and_feature_shapes(pipeline_config, tmp_path: Path) -> No
     assert features.values.shape == (36, 2, 240)
     assert features.targets.shape == (36, 2)
 
+
+def test_gray_mode_has_one_channel(pipeline_config, tmp_path: Path) -> None:
+    dataset = build_data_source(
+        pipeline_config.data,
+        pipeline_config.training.seed,
+        tmp_path,
+    ).load()
+    gray_config = replace(
+        pipeline_config.preprocessing,
+        color_mode="gray",
+        mean=[0.5],
+        std=[0.5],
+    )
+    canonical = VideoPreprocessor(pipeline_config.data, gray_config).transform(dataset)
+    assert canonical.frames.shape == (36, 2, 1, 8, 10)
+    assert canonical.frames.dtype == np.float32

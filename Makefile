@@ -2,8 +2,9 @@ PYTHON ?= .venv/bin/python
 PIP ?= .venv/bin/pip
 CONFIG ?= configs/base.yaml
 MODEL ?=
+PREPROCESS_FLAGS ?=
 
-.PHONY: setup setup-video validate smoke train evaluate predict test mlflow
+.PHONY: setup setup-video validate preprocess smoke train evaluate predict test check mlflow
 
 setup:
 	python3 -m venv .venv
@@ -17,6 +18,9 @@ setup-video:
 
 validate:
 	$(PYTHON) -m ggulnote_ml validate-config --config $(CONFIG)
+
+preprocess:
+	$(PYTHON) -m ggulnote_ml preprocess --config $(CONFIG) $(PREPROCESS_FLAGS)
 
 smoke:
 	$(PYTHON) -m ggulnote_ml train --config configs/local-no-mlflow.yaml
@@ -34,6 +38,8 @@ predict:
 
 test:
 	$(PYTHON) -m pytest
+
+check: validate test smoke
 
 mlflow:
 	.venv/bin/mlflow server \

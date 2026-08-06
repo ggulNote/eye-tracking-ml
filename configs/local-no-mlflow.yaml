@@ -5,9 +5,13 @@ project:
 data:
   source: synthetic
   manifest_path: null
+  dataset_version: synthetic-smoke-v001
+  processed_dir: processed
+  train_from_processed: false
   num_samples: 48
   num_participants: 8
   sequence_length: 3
+  frame_stride: 1
   raw_height: 24
   raw_width: 32
   train_fraction: 0.50
@@ -15,10 +19,27 @@ data:
   test_fraction: 0.25
 
 preprocessing:
+  color_mode: rgb
   output_height: 16
   output_width: 20
   mean: [0.5, 0.5, 0.5]
   std: [0.5, 0.5, 0.5]
+
+model_io:
+  profile: webeyetrack_v1
+  image_height: 128
+  image_width: 512
+  color_mode: rgb
+  channels: 3
+  layout: BHWC
+  image_dtype: float32
+  image_range: [0.0, 1.0]
+  head_vector_size: 3
+  face_origin_3d_size: 3
+  embedding_size: 512
+  output_size: 2
+  output_coordinate_space: screen_centered_normalized
+  support_size: 9
 
 feature_extraction:
   name: identity
@@ -44,4 +65,3 @@ mlflow:
   experiment_name: ggulnote-gaze
   registered_model_name: null
   run_name: local-smoke-test
-
