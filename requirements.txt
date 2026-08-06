@@ -1,0 +1,8 @@
+# Runtime dependencies validated with Python 3.9.
+mlflow==3.1.4
+numpy==2.0.2
+PyYAML==6.0.3
+
+# macOS system Python 3.9 links against LibreSSL 2.8.3.
+urllib3==1.26.20; python_version < "3.10"
+

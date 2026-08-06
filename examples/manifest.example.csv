@@ -1,0 +1,4 @@
+video_path,source,participant_id,session_id,target_x,target_y,rotation_degrees
+../data/raw/webcam/person-001/session-001.mp4,webcam,person-001,session-001,0.25,0.40,0
+../data/raw/phone/person-002/session-001.mp4,phone,person-002,session-001,0.70,0.65,90
+

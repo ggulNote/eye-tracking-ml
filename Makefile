@@ -1,0 +1,43 @@
+PYTHON ?= .venv/bin/python
+PIP ?= .venv/bin/pip
+CONFIG ?= configs/base.yaml
+MODEL ?=
+
+.PHONY: setup setup-video validate smoke train evaluate predict test mlflow
+
+setup:
+	python3 -m venv .venv
+	$(PYTHON) -m pip install --upgrade pip
+	$(PIP) install -r requirements-dev.txt
+	$(PIP) install -e . --no-deps
+
+setup-video:
+	$(PIP) install -r requirements-video.txt
+	$(PIP) install -e . --no-deps
+
+validate:
+	$(PYTHON) -m ggulnote_ml validate-config --config $(CONFIG)
+
+smoke:
+	$(PYTHON) -m ggulnote_ml train --config configs/local-no-mlflow.yaml
+
+train:
+	$(PYTHON) -m ggulnote_ml train --config $(CONFIG)
+
+evaluate:
+	@test -n "$(MODEL)" || (echo "MODEL=/path/to/model.npz is required" && exit 2)
+	$(PYTHON) -m ggulnote_ml evaluate --config $(CONFIG) --model-path $(MODEL)
+
+predict:
+	@test -n "$(MODEL)" || (echo "MODEL=/path/to/model.npz is required" && exit 2)
+	$(PYTHON) -m ggulnote_ml predict --config $(CONFIG) --model-path $(MODEL)
+
+test:
+	$(PYTHON) -m pytest
+
+mlflow:
+	.venv/bin/mlflow server \
+		--backend-store-uri sqlite:///mlflow.db \
+		--default-artifact-root ./mlruns \
+		--host 127.0.0.1 \
+		--port 5000

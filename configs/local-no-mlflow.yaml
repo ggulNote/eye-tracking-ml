@@ -1,0 +1,47 @@
+project:
+  name: ggulnote-gaze
+  task: gaze_coordinate_regression
+
+data:
+  source: synthetic
+  manifest_path: null
+  num_samples: 48
+  num_participants: 8
+  sequence_length: 3
+  raw_height: 24
+  raw_width: 32
+  train_fraction: 0.50
+  validation_fraction: 0.25
+  test_fraction: 0.25
+
+preprocessing:
+  output_height: 16
+  output_width: 20
+  mean: [0.5, 0.5, 0.5]
+  std: [0.5, 0.5, 0.5]
+
+feature_extraction:
+  name: identity
+  version: v1
+
+model:
+  name: ridge
+  version: v1
+  alpha: 1.0
+
+training:
+  seed: 42
+  output_dir: outputs
+
+evaluation:
+  screen_width: 1920
+  screen_height: 1080
+  distance_thresholds: [0.05, 0.10]
+
+mlflow:
+  enabled: false
+  tracking_uri: sqlite:///mlflow.db
+  experiment_name: ggulnote-gaze
+  registered_model_name: null
+  run_name: local-smoke-test
+
