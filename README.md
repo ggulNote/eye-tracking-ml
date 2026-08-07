@@ -55,6 +55,7 @@ MLflow
 ```bash
 make setup
 make setup-video
+make setup-capture
 
 make validate
 make preprocess
@@ -67,6 +68,27 @@ make test
 make smoke
 ```
 
+## MacBook 웹캠 + iPhone 동시 캡처
+
+GUI 지원 OpenCV를 별도로 설치한 뒤 연결 가능한 카메라 번호를 확인합니다.
+
+```bash
+make setup-capture
+make list-cameras
+```
+
+`configs/capture.yaml`에서 `device_index`를 확인하고 동시 캡처를 실행합니다.
+
+```bash
+make capture
+```
+
+기본 설정은 `0=MacBook`, `1=iPhone 연속성 카메라`입니다. 두 미리보기가 반대로 나오면 두 번호를 교환합니다. `Q` 또는 `Esc`로 종료하면 카메라별 MP4와 공통 세션 시계 기준 timestamp CSV가 `data/raw/captures/`에 저장됩니다. 원본 영상은 `.gitignore` 대상입니다.
+
+macOS는 `avfoundation`, Linux는 `v4l2`, Windows는 `dshow` backend를 사용합니다. `mirror`는 미리보기에만 적용되며 학습용 원본 파일은 반전하지 않습니다. iPhone 연속성 카메라는 후면 카메라만 제공합니다.
+
+자세한 설정과 입출력 규격은 [다중 카메라 캡처 문서](docs/multi-camera-capture.md)를 참고합니다.
+
 전체 검증은 다음 명령으로 실행할 수 있습니다.
 
 ```bash
@@ -78,4 +100,5 @@ make check
 - [데이터 파이프라인](docs/data-pipeline.md)
 - [모델 파이프라인](docs/model-pipeline.md)
 - [WebEyeTrack 입출력 규격](docs/webeyetrack-data-contract.md)
+- [다중 카메라 캡처](docs/multi-camera-capture.md)
 - [협업 규칙](CONTRIBUTING.md)

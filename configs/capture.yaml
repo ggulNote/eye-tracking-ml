@@ -1,0 +1,26 @@
+cameras:
+  - name: macbook
+    device_index: 0
+    backend: avfoundation
+    width: 1280
+    height: 720
+    fps: 30
+    warmup_frames: 5
+    mirror: true
+  - name: iphone
+    device_index: 1
+    backend: avfoundation
+    width: 1280
+    height: 720
+    fps: 30
+    warmup_frames: 5
+    mirror: false
+
+preview:
+  enabled: true
+  window_name_prefix: Gaze Capture
+
+recording:
+  enabled: true
+  output_directory: data/raw/captures
+  video_codec: mp4v

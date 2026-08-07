@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# GUI preview requires the non-headless OpenCV distribution.
+opencv-python>=4.10,<5

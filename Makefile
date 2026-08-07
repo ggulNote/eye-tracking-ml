@@ -4,7 +4,7 @@ CONFIG ?= configs/base.yaml
 MODEL ?=
 PREPROCESS_FLAGS ?=
 
-.PHONY: setup setup-video validate preprocess smoke train evaluate predict test check mlflow
+.PHONY: setup setup-video setup-capture capture list-cameras validate preprocess smoke train evaluate predict test check mlflow
 
 setup:
 	python3 -m venv .venv
@@ -15,6 +15,18 @@ setup:
 setup-video:
 	$(PIP) install -r requirements-video.txt
 	$(PIP) install -e . --no-deps
+
+setup-capture:
+	python3 -m venv .venv
+	$(PYTHON) -m pip install --upgrade pip
+	$(PIP) install -r requirements-capture.txt
+	$(PIP) install -e . --no-deps
+
+capture:
+	$(PYTHON) -m ggulnote_ml.capture --config configs/capture.yaml
+
+list-cameras:
+	$(PYTHON) -m ggulnote_ml.capture --config configs/capture.yaml --list-cameras
 
 validate:
 	$(PYTHON) -m ggulnote_ml validate-config --config $(CONFIG)

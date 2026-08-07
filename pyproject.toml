@@ -22,9 +22,13 @@ dev = [
 video = [
   "opencv-python-headless>=4.10,<5",
 ]
+capture = [
+  "opencv-python>=4.10,<5",
+]
 
 [project.scripts]
 ggulnote-ml = "ggulnote_ml.cli:main"
+ggulnote-capture = "ggulnote_ml.capture.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
