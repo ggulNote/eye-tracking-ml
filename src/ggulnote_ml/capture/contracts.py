@@ -17,6 +17,7 @@ class FramePacket:
 
     frame_index: int
     captured_at_ms: float
+    unix_timestamp_ns: int
     frame: np.ndarray
 
     def validate(self) -> None:
@@ -24,6 +25,8 @@ class FramePacket:
             raise ValueError("frame_index must be non-negative.")
         if self.captured_at_ms < 0:
             raise ValueError("captured_at_ms must be non-negative.")
+        if self.unix_timestamp_ns <= 0:
+            raise ValueError("unix_timestamp_ns must be positive.")
         if self.frame.dtype != np.uint8:
             raise ValueError("frame dtype must be uint8, got %s." % self.frame.dtype)
         if self.frame.ndim != 3 or self.frame.shape[2] != 3:

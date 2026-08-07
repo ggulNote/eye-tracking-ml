@@ -1,6 +1,14 @@
+dataset:
+  root_directory: data/raw/participants
+  require_calibration_assets: true
+
 cameras:
+  # 이 Mac에서는 연속성 카메라(iPhone)가 0, 내장 웹캠이 1로 인식됩니다.
+  # 다른 노트북에서는 --list-cameras로 확인하고 device_index만 조정하세요.
+  # role은 저장 폴더와 연결되므로 서로 바꾸지 않습니다.
   - name: macbook
-    device_index: 0
+    role: webcam_front
+    device_index: 1
     backend: avfoundation
     width: 1280
     height: 720
@@ -8,7 +16,8 @@ cameras:
     warmup_frames: 5
     mirror: true
   - name: iphone
-    device_index: 1
+    role: iphone_left
+    device_index: 0
     backend: avfoundation
     width: 1280
     height: 720
@@ -22,5 +31,71 @@ preview:
 
 recording:
   enabled: true
-  output_directory: data/raw/captures
   video_codec: mp4v
+
+display:
+  window_name: Gaze Collection
+  fullscreen: true
+  canvas_width: 1920
+  canvas_height: 1080
+  point_radius_px: 12
+  background_bgr: [0, 0, 0]
+  point_bgr: [255, 255, 255]
+  guide_bgr: [48, 48, 48]
+
+protocols:
+  intro_center_ms: 5000
+  transition_ms: 3000
+  center_refix_ms: 4000
+  completion_duration_ms: 3000
+
+  train_static:
+    protocol_id: train_static_3x9
+    split: train
+    columns: 3
+    rows: 9
+    repeats: 1
+    x_min: 0.2
+    x_max: 0.8
+    y_min: 0.08
+    y_max: 0.92
+    point_duration_ms: 1200
+    settling_duration_ms: 400
+    usable_duration_ms: 650
+    random_seed: 20260807
+
+  evaluation_static:
+    protocol_id: evaluation_static_3x6
+    split: evaluation
+    columns: 3
+    rows: 6
+    repeats: 1
+    x_min: 0.2
+    x_max: 0.8
+    y_min: 0.1325
+    y_max: 0.8675
+    y_positions: [0.1325, 0.2375, 0.4475, 0.5525, 0.7625, 0.8675]
+    point_duration_ms: 1200
+    settling_duration_ms: 400
+    usable_duration_ms: 650
+    random_seed: 20260808
+
+  dynamic:
+    protocol_id: dynamic_vertical_3col
+    split: train
+    columns: [0.2, 0.5, 0.8]
+    y_min: 0.08
+    y_max: 0.92
+    movement_duration_ms: 5000
+    transition_duration_ms: 1000
+    edge_exclusion_ms: 400
+    # 레이턴시 측정 후 이 값만 바꾸면 동적 label에 target(t-lag)가 적용됩니다.
+    latency_ms: 0
+    show_guide_line: true
+
+simulation:
+  fps: 10
+  width: 320
+  height: 180
+  phone_delay_ms: 5.0
+  base_unix_timestamp_ns: 1700000000000000000

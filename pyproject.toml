@@ -24,6 +24,7 @@ video = [
 ]
 capture = [
   "opencv-python>=4.10,<5",
+  "scipy>=1.10,<2",
 ]
 
 [project.scripts]

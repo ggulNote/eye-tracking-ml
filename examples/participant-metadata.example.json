@@ -1,0 +1,20 @@
+{
+  "vision_correction": "glasses",
+  "touch_typist": true,
+  "dominant_hand": "right",
+  "eye_color": "brown",
+  "facial_hair": false,
+  "lighting_condition": "indoor_diffuse",
+  "eye_to_screen_distance_mm": 600,
+  "monitor": {
+    "width_pixel": 1920,
+    "height_pixel": 1080,
+    "width_mm": 310,
+    "height_mm": 174
+  },
+  "camera_positions": {
+    "webcam_front": "monitor_top_center",
+    "iphone_left": "participant_left_35_deg"
+  },
+  "consent_record_id": "store-separately-from-anonymous-dataset"
+}

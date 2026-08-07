@@ -46,6 +46,7 @@ class CameraSource:
             raise RuntimeError("CameraSource must be used as a context manager.")
         ok, frame = self._capture.read()
         captured_ns = time.monotonic_ns()
+        unix_timestamp_ns = time.time_ns()
         if not ok or frame is None:
             raise RuntimeError("Could not read a frame from camera %s." % self.config.name)
         if frame.shape[:2] != (self.config.height, self.config.width):
@@ -53,6 +54,7 @@ class CameraSource:
         packet = FramePacket(
             frame_index=self._frame_index,
             captured_at_ms=(captured_ns - session_started_ns) / 1_000_000.0,
+            unix_timestamp_ns=unix_timestamp_ns,
             frame=frame,
         )
         packet.validate()

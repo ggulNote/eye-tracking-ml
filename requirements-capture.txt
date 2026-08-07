@@ -2,3 +2,4 @@
 
 # GUI preview requires the non-headless OpenCV distribution.
 opencv-python>=4.10,<5
+scipy>=1.10,<2

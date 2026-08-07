@@ -1,0 +1,37 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Gaze: list cameras",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ggulnote_ml.capture",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "args": ["--config", "configs/capture.yaml", "--list-cameras"]
+    },
+    {
+      "name": "Gaze: collect all protocols",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ggulnote_ml.capture",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "args": ["--config", "configs/capture.yaml", "--protocol", "all"]
+    },
+    {
+      "name": "Gaze: simulation p00",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ggulnote_ml.capture",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--config", "configs/capture.yaml",
+        "--participant", "p00",
+        "--protocol", "all",
+        "--simulate"
+      ]
+    }
+  ]
+}

@@ -30,9 +30,11 @@ class SessionRecorder:
                 raise RuntimeError("Could not open video output: %s" % self.video_path)
             self._csv_file = self.timestamps_path.open("w", encoding="utf-8", newline="")
             self._csv_writer = csv.writer(self._csv_file)
-            self._csv_writer.writerow(["frame_index", "captured_at_ms"])
+            self._csv_writer.writerow(["frame", "elapsed_ms", "timestamp"])
         self._writer.write(packet.frame)
-        self._csv_writer.writerow([packet.frame_index, "%.3f" % packet.captured_at_ms])
+        self._csv_writer.writerow(
+            [packet.frame_index, "%.3f" % packet.captured_at_ms, packet.unix_timestamp_ns]
+        )
 
     def close(self) -> None:
         if self._writer is not None:

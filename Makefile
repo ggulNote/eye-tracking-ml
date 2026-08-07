@@ -3,8 +3,12 @@ PIP ?= .venv/bin/pip
 CONFIG ?= configs/base.yaml
 MODEL ?=
 PREPROCESS_FLAGS ?=
+PARTICIPANT ?=
+PROTOCOL ?=all
+ALLOW_MISSING_CALIBRATION ?=
+DATASET_ROOT ?=
 
-.PHONY: setup setup-video setup-capture capture list-cameras validate preprocess smoke train evaluate predict test check mlflow
+.PHONY: setup setup-video setup-capture collect simulate suggest-participant list-cameras validate preprocess smoke train evaluate predict test check mlflow
 
 setup:
 	python3 -m venv .venv
@@ -22,8 +26,14 @@ setup-capture:
 	$(PIP) install -r requirements-capture.txt
 	$(PIP) install -e . --no-deps
 
-capture:
-	$(PYTHON) -m ggulnote_ml.capture --config configs/capture.yaml
+collect:
+	$(PYTHON) -m ggulnote_ml.capture --config configs/capture.yaml $(if $(PARTICIPANT),--participant $(PARTICIPANT),) --protocol $(PROTOCOL) $(if $(ALLOW_MISSING_CALIBRATION),--allow-missing-calibration,) $(if $(DATASET_ROOT),--dataset-root $(DATASET_ROOT),)
+
+simulate:
+	$(PYTHON) -m ggulnote_ml.capture --config configs/capture.yaml --simulate $(if $(PARTICIPANT),--participant $(PARTICIPANT),) --protocol $(PROTOCOL) $(if $(DATASET_ROOT),--dataset-root $(DATASET_ROOT),)
+
+suggest-participant:
+	$(PYTHON) -m ggulnote_ml.capture --config configs/capture.yaml --suggest-participant
 
 list-cameras:
 	$(PYTHON) -m ggulnote_ml.capture --config configs/capture.yaml --list-cameras
