@@ -1,0 +1,517 @@
+# Base contract for the static-image gaze pipeline.
+# Current prepare saves the resolved version; training-related sections below
+# are marked [미구현] until the trainer/adapter runtime is added.
+
+schema_version: 1
+
+experiment:
+  # name groups output/MLflow runs; run_name adds a resolve-time timestamp.
+  name: mpiifacegaze_front_baseline
+  run_name: "${experiment.name}-${now:%Y%m%d_%H%M%S}"
+  description: "MPIIFaceGaze front-view static-image baseline; fusion disabled"
+  # seed controls splits/augmentation; deterministic asks the future trainer for reproducibility.
+  seed: 42
+  deterministic: true
+  tags:
+    dataset: MPIIFaceGaze
+    task: screen_point_regression
+    data_unit: image
+
+paths:
+  # Keep local absolute paths out of the tracked config. Override with env vars.
+  # Every generated directory is nested under one timestamped run_dir.
+  data_root: "${oc.env:GAZE_DATA_ROOT,./data/MPIIFaceGaze}"
+  output_root: "${oc.env:GAZE_OUTPUT_ROOT,./outputs}"
+  run_dir: "${paths.output_root}/${experiment.name}/${experiment.run_name}"
+  checkpoint_dir: "${paths.run_dir}/checkpoints"
+  model_dir: "${paths.run_dir}/models"
+  metric_dir: "${paths.run_dir}/metrics"
+  prediction_dir: "${paths.run_dir}/predictions"
+  report_dir: "${paths.run_dir}/reports"
+
+task:
+  # Model target/output contract: one float32 [x,y] screen point per image.
+  type: screen_point_regression
+  output_key: gaze_xy
+  output_dim: 2
+  output_order: [x, y]
+  output_dtype: float32
+  coordinate_system:
+    name: centered_normalized_screen
+    # x_norm = x_pixel / screen_width - 0.5
+    # y_norm = y_pixel / screen_height - 0.5
+    normalization_denominator: screen_size
+    # Pixel indices end at W-1/H-1, so the observed upper edge is just below 0.5.
+    observed_range_semantics: left_closed_right_open
+    target_range: [-0.5, 0.5]
+    origin: screen_center
+    x_positive_direction: right
+    y_positive_direction: down
+  # [-0.5, 0.5] is a target convention, not a ReLU activation range.
+  # identity allows negative x/y. Optional bounded alternative: scaled_tanh.
+  output_activation: identity
+  scaled_tanh_scale: 0.5
+  clamp_for_metrics: false
+  clamp_for_visualization: true
+  uncertainty:
+    # Optional per-axis log variance; disabled while the baseline predicts gaze_xy only.
+    enabled: false
+    output_key: log_variance_xy
+    parameterization: log_variance
+
+data:
+  mode: image
+  dataset_name: MPIIFaceGaze
+  dataset_root: "${paths.data_root}"
+  image_extensions: [.jpg, .jpeg, .png]
+
+  # MPIIFaceGaze row 1 contains a relative image path. There is no video window.
+  reader:
+    type: mpiifacegaze_text
+    subject_glob: "p??"
+    annotation_file_template: "{subject_id}/{subject_id}.txt"
+    image_path_from_column: 0
+    delimiter: whitespace
+    has_header: false
+    verify_image_exists: true
+    fail_on_bad_row: true
+    # Some original MPIIFaceGaze labels lie outside that subject's screen size.
+    # Preserve the raw target and mark it; never clamp or silently rewrite it.
+    target_bounds_policy: keep_flagged
+    # All indices below are zero-based and inclusive where a pair is shown.
+    columns:
+      image_relative_path: 0
+      gaze_screen_xy_px: [1, 2]
+      facial_landmarks_xy: [3, 14]
+      head_rotation_3d: [15, 17]
+      head_translation_3d: [18, 20]
+      face_center_3d: [21, 23]
+      gaze_target_3d: [24, 26]
+      evaluation_eye: 27
+    calibration:
+      camera_file_template: "{subject_id}/Calibration/Camera.mat"
+      monitor_pose_file_template: "{subject_id}/Calibration/monitorPose.mat"
+      screen_size_file_template: "{subject_id}/Calibration/screenSize.mat"
+
+  # Maps a physical source to a model branch. MPIIFaceGaze provides only front.
+  views:
+    available: [front]
+    source_to_branch:
+      mpiifacegaze: front
+    # Future dual-camera layout: <subject>/webcam and <subject>/phonecam.
+    directory_to_branch:
+      webcam: front
+      phonecam: side
+
+  pairing:
+    # false is correct for the supplied MPIIFaceGaze still images.
+    enabled: false
+    unit: image
+    strategy: explicit_pair_id
+    pair_id_key: pair_id
+    require_same_subject: true
+    require_same_target: true
+    # 0.0 requires an exact normalized target match inside each explicit pair.
+    max_target_distance_normalized: 0.0
+    # branch_only: unpaired samples can train an encoder but not fusion.
+    unpaired_policy: branch_only
+    exclude_unpaired_from_fusion_metrics: true
+
+  split:
+    # Split whole subjects, not images, to prevent identity leakage.
+    strategy: grouped_ratio
+    group_key: subject_id
+    ratios:
+      train: 0.70
+      validation: 0.15
+      test: 0.15
+    seed: "${experiment.seed}"
+    shuffle_groups: true
+    stratify_by: null
+    prevent_group_leakage: true
+    # prepare writes canonical/all and train/validation/test CSV files here.
+    manifest_dir: "${paths.run_dir}/manifests"
+
+  dataloader:
+    # Worker/prefetch flags affect throughput only; split shuffle controls sample order.
+    batch_size: 32
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 2
+    train_shuffle: true
+    validation_shuffle: false
+    test_shuffle: false
+    drop_last_train: false
+
+preprocessing:
+  # [구현] Dataset이 enabled stage를 아래 순서대로 실행합니다.
+  stage_order:
+    - decode
+    - exif_orientation
+    - validate
+    - face_landmarks
+    - eye_selection
+    - eye_state
+    - metric_head_pose
+    - eye_region_warp
+    - face_roi
+    - background_mask
+    - resize
+    - normalize
+    - augment
+
+  decode:
+    enabled: true
+    backend: opencv
+    source_color_order: BGR
+    output_color_order: RGB
+    output_dtype: uint8
+
+  exif_orientation:
+    enabled: true
+
+  validate:
+    enabled: true
+    reject_corrupt: true
+    min_width_px: 32
+    min_height_px: 32
+
+  face_landmarks:
+    # MPIIFaceGaze annotations already include six facial landmarks.
+    enabled: true
+    source: annotation
+    # Built-in OpenCV Haar fallback is created lazily when annotations are absent.
+    fallback_detector: opencv_haar
+    # drop removes the sample when neither annotations nor fallback detection work.
+    on_failure: drop
+
+  eye_selection:
+    # Enable for a branch that needs both eyes, a fixed eye, or the most visible eye.
+    enabled: false
+    mode: both
+    target_eye: null
+    # Visibility scores below this value make the requested eye invalid.
+    min_visibility: 0.60
+    # none preserves the anatomical left/right orientation.
+    canonicalize_to: none
+    # mark_invalid keeps a masked sample so batch shape remains stable.
+    on_failure: mark_invalid
+
+  eye_state:
+    # EAR is computed from MediaPipe eye-contour landmarks before any crop/warp.
+    enabled: false
+    method: ear
+    # EAR below 0.20 is treated as closed; all_open requires both front eyes.
+    threshold: 0.20
+    required_eye_policy: all_open
+    on_closed: mark_invalid
+    landmark_indices:
+      left: [362, 385, 387, 263, 373, 380]
+      right: [133, 158, 160, 33, 144, 153]
+    on_failure: mark_invalid
+
+  metric_head_pose:
+    # WebEyeTrack-compatible metric reconstruction; branch adapters choose which
+    # canonical outputs reach the model. The BlazeGaze profile uses
+    # head_vector [3] and face_origin_3d [3], not a flattened pose matrix.
+    enabled: false
+    method: webeyetrack_radial_procrustes
+    output_unit: cm
+    output_representation: webeyetrack_components
+    face_origin_source: annotation_or_reconstruct
+    annotation_unit: mm
+    required_irises: both
+    # Physical assumptions and iterative depth-solver limits.
+    iris_diameter_cm: 1.20
+    initial_depth_cm: 60.0
+    max_iterations: 10
+    max_depth_step_cm: 5.0
+    keep_metric_face: false
+    # mark_invalid preserves the sample but excludes invalid gaze supervision.
+    on_failure: mark_invalid
+
+  eye_region_warp:
+    # Generic fallback. BlazeGaze/profile90 profile이 model별 geometry로 덮어씁니다.
+    enabled: false
+    method: landmark_homography
+    size_hw: [128, 512]
+    on_failure: drop
+
+  face_roi:
+    # margin_ratio expands the landmark box; keep_full_face avoids a partial-face crop.
+    enabled: false
+    source: landmarks_bbox
+    margin_ratio: 0.20
+    keep_full_face: true
+    on_failure: use_full_image
+
+  background_mask:
+    # Supplied MPIIFaceGaze images already place the face on a black canvas.
+    enabled: false
+    method: face_hull
+    fill_rgb: [0, 0, 0]
+    # 0 keeps a hard mask edge; increase only when soft blending is desired.
+    feather_px: 0
+
+  resize:
+    # size_hw is [height,width]; aspect-preserving resize pads with pad_rgb.
+    enabled: true
+    size_hw: [224, 224]
+    keep_aspect_ratio: true
+    pad_rgb: [0, 0, 0]
+    interpolation_train: bilinear
+    interpolation_eval: bilinear
+
+  normalize:
+    enabled: true
+    # zero_one means uint8 / 255. Change with the model contract when required.
+    mode: zero_one
+    mean: null
+    std: null
+    output_dtype: float32
+    channel_order: CHW
+
+  augment:
+    # Probabilities/ranges apply only to train when this stage is enabled.
+    enabled: false
+    apply_to: train_only
+    horizontal_flip_probability: 0.0
+    color_jitter:
+      enabled: false
+      brightness: 0.1
+      contrast: 0.1
+      saturation: 0.1
+      hue: 0.02
+
+  branch_overrides:
+    front:
+      enabled: true
+      representation: full_face_black_canvas
+    side:
+      enabled: false
+      representation: profile_face_black_canvas
+
+model:
+  # [미구현] I/O contract validation만 구현됨. entrypoint/adapter 실행은 아직 없습니다.
+  backend: pytorch
+  # The adapter standardizes arbitrary external model inputs and outputs.
+  front:
+    enabled: true
+    # source_dir optionally adds external model code to imports.
+    source_dir: null
+    # entrypoint uses package.module:callable; adapter_entrypoint maps custom I/O.
+    entrypoint: null
+    adapter_entrypoint: null
+    init_args: {}
+    pretrained:
+      # Optional state path plus reproducibility hash; strict enforces exact keys/shapes.
+      path: null
+      sha256: null
+      strict: true
+    input_contract:
+      # B is batch size; D_front is chosen by the external encoder.
+      image_key: front_image
+      shape: [B, 3, 224, 224]
+      dtype: float32
+      color_order: RGB
+      value_range: [0.0, 1.0]
+    output_contract:
+      gaze_key: gaze_xy
+      gaze_shape: [B, 2]
+      embedding_key: front_embedding
+      embedding_shape: [B, D_front]
+      uncertainty_key: null
+
+  side:
+    enabled: false
+    # source_dir optionally adds external model code to imports.
+    source_dir: null
+    # Set these only after supplying a side model implementation/adapter.
+    entrypoint: null
+    adapter_entrypoint: null
+    init_args: {}
+    pretrained:
+      path: null
+      sha256: null
+      strict: true
+    input_contract:
+      image_key: side_image
+      shape: [B, 3, 224, 224]
+      dtype: float32
+      color_order: RGB
+      value_range: [0.0, 1.0]
+    output_contract:
+      gaze_key: gaze_xy
+      gaze_shape: [B, 2]
+      embedding_key: side_embedding
+      embedding_shape: [B, D_side]
+      uncertainty_key: null
+
+fusion:
+  # [미구현] 향후 late-fusion 계약. 현재는 의존성만 config에서 검증합니다.
+  enabled: false
+  stage: late
+  method: axis_aware_gated
+  entrypoint: null
+  input_keys:
+    - front.gaze_xy
+    - front.front_embedding
+    - side.gaze_xy
+    - side.side_embedding
+  output_key: gaze_xy
+  output_shape: [B, 2]
+  axis_priors:
+    # Initial trust weights by output axis; learnable_gate may update them.
+    x:
+      front: 0.80
+      side: 0.20
+    y:
+      front: 0.40
+      side: 0.60
+  learnable_gate: true
+  # quality/uncertainty enable optional gating signals when models expose them.
+  use_quality: true
+  use_uncertainty: false
+  # use_available_branch falls back to the valid camera instead of dropping a pair.
+  missing_branch_policy: use_available_branch
+
+training:
+  # [미구현] 향후 trainer가 사용할 실행 계약입니다.
+  max_epochs: 100
+  # auto selects an available accelerator; devices is its requested device count.
+  accelerator: auto
+  devices: 1
+  # Floating-point precision in bits for the future trainer.
+  precision: 32
+  # Accumulate N batches before one optimizer step; clip the total gradient norm.
+  gradient_accumulation_steps: 1
+  gradient_clip_norm: 1.0
+  # Logging/validation intervals are optimizer steps and completed epochs respectively.
+  log_every_n_steps: 20
+  validate_every_n_epochs: 1
+  sanity_validation_batches: 2
+  early_stopping:
+    # Stop when the monitored validation metric no longer decreases.
+    enabled: true
+    monitor: "val/${metrics.selection_metric}"
+    mode: min
+    patience_epochs: 15
+    min_delta: 0.0
+
+optimizer:
+  # [미구현] trainer 구현 후 사용됩니다.
+  name: AdamW
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  betas: [0.9, 0.999]
+
+scheduler:
+  # [미구현] trainer 구현 후 사용됩니다.
+  enabled: true
+  name: ReduceLROnPlateau
+  monitor: "val/${metrics.selection_metric}"
+  mode: min
+  # Multiply LR by factor after patience_epochs without improvement.
+  factor: 0.5
+  patience_epochs: 5
+  min_learning_rate: 0.000001
+
+loss:
+  # [미구현] 이름/입력 계약만 정의되어 있습니다.
+  primary:
+    # Huber delta is expressed in normalized screen coordinates.
+    name: huber_xy
+    prediction_key: gaze_xy
+    target_key: target_gaze_xy
+    delta: 0.05
+    weight: 1.0
+    axis_weights:
+      x: 1.0
+      y: 1.0
+  uncertainty_nll:
+    enabled: false
+    weight: 0.0
+  branch_auxiliary:
+    enabled: false
+    front_weight: 0.0
+    side_weight: 0.0
+
+metrics:
+  # [미구현] 현재 prepare run에서는 metric을 계산하지 않습니다.
+  # cm requires per-subject screen width/height in screenSize.mat.
+  selection_metric: subject_macro_euclidean_cm
+  fallback_selection_metric: subject_macro_euclidean_normalized
+  report:
+    - euclidean_normalized_mean
+    - euclidean_normalized_median
+    - euclidean_pixel_mean
+    - euclidean_cm_mean
+    - mae_x_normalized
+    - mae_y_normalized
+    - rmse_normalized
+    - p90_euclidean_cm
+    - p95_euclidean_cm
+    - out_of_bounds_rate
+  aggregations: [sample_micro, subject_macro]
+  # Namespaces keep branch and future fusion scores separate in MLflow.
+  namespaces: [front, side, fusion]
+  angular_error_deg:
+    # Enable only when evaluating the optional 3D gaze vector gt - fc.
+    enabled: false
+    prediction_key: gaze_vector_3d
+    target_key: gaze_vector_3d
+
+checkpoint:
+  # [미구현] 권장 형식은 state_dict 기반 .pt입니다.
+  dir: "${paths.checkpoint_dir}"
+  save_best:
+    enabled: true
+    filename: best_weights.pt
+    monitor: "val/${metrics.selection_metric}"
+    mode: min
+    weights_only: true
+  save_last:
+    # last_checkpoint.pt is resumable because optimizer/RNG state is included.
+    enabled: true
+    filename: last_checkpoint.pt
+    include_optimizer: true
+    include_scheduler: true
+    include_scaler: true
+    include_rng_state: true
+  save_every_n_epochs: 0
+  # 1 keeps only the best monitored checkpoint; 0 above disables periodic saves.
+  keep_top_k: 1
+  resume_from: null
+
+model_export:
+  # [미구현] trainer 완료 후 최종 weight와 contract를 내보냅니다.
+  enabled: true
+  dir: "${paths.model_dir}"
+  filename: final_weights.pt
+  format: pytorch_state_dict
+  include_resolved_config: true
+  include_model_contract: true
+
+mlflow:
+  # [구현] 현재는 data-preparation params/artifacts만 기록합니다.
+  # 학습 metric/model/checkpoint 기록은 trainer와 함께 구현할 예정입니다.
+  enabled: true
+  # MLflow 3.14 no longer accepts a filesystem tracking backend by default.
+  # SQLite keeps local runs reproducible without the deprecated file store.
+  tracking_uri: "${oc.env:MLFLOW_TRACKING_URI,sqlite:///./mlflow.db}"
+  # Experiment groups related runs; run_name identifies this timestamped execution.
+  experiment_name: "${experiment.name}"
+  run_name: "${experiment.run_name}"
+  # Ask MLflow to sample host CPU/memory metrics during prepare.
+  log_system_metrics: true
+  # The following flags control data-preparation artifacts uploaded to MLflow.
+  log_resolved_config: true
+  log_dataset_manifest: true
+  log_split_manifest: true
+  # Records Python/platform/package versions without uploading raw images.
+  log_environment: true
+  tags:
+    schema_version: "${schema_version}"
+    data_mode: "${data.mode}"
+    pairing_strategy: "${data.pairing.strategy}"

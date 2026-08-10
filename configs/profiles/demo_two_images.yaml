@@ -1,0 +1,56 @@
+# Two synthetic images for a local data-pipeline and MLflow smoke test.
+# Use only with scripts/create_two_image_demo.py / make demo-two-images.
+# Scope: config -> manifest/split -> generic ROI preprocessing -> MLflow prepare run.
+# It does not test BlazeGaze/Profile90 geometry, model forward, or training.
+
+experiment:
+  name: demo_two_images  # Separate MLflow experiment for the synthetic smoke test.
+  description: "Two-image synthetic smoke test; not a training benchmark"
+  tags:
+    dataset: synthetic_two_image_demo
+    purpose: smoke_test
+
+data:
+  dataset_name: synthetic_two_image_demo  # Human-readable dataset lineage name.
+  reader:
+    type: generic_csv
+    manifest_path: "${oc.env:DEMO_MANIFEST,./.demo/two_images/manifest.csv}"  # Generated CSV.
+    verify_image_exists: true    # Confirm both generated PNG paths.
+    verify_image_shape: true     # Store their 640x360 dimensions.
+    target_bounds_policy: error  # Demo targets must be inside the screen.
+  views:
+    available: [front]
+  pairing:
+    enabled: false  # The demo checks front-only preparation, not fusion.
+  split:
+    # Two subject groups populate train and validation; test is intentionally empty.
+    # Ratios operate on subject groups and must sum to 1.0.
+    ratios:
+      train: 0.50
+      validation: 0.50
+      test: 0.0
+  dataloader:
+    batch_size: 2          # Both demo rows fit in one batch.
+    num_workers: 0         # Portable smoke-test setting.
+    pin_memory: false      # CPU-only demo.
+    persistent_workers: false
+
+preprocessing:
+  face_landmarks:
+    enabled: true          # Use the six synthetic points stored in the CSV.
+    source: annotation
+    on_failure: error      # Demo data must be fully valid.
+  face_roi:
+    enabled: true          # Crop the annotated synthetic face.
+    source: landmarks_bbox
+    margin_ratio: 0.20      # Add 20% context around the landmark box.
+    # Preserve the full detected face instead of selecting an eye subregion.
+    keep_full_face: true
+    on_failure: error
+  background_mask:
+    enabled: true          # Keep only the face hull on black.
+    method: face_hull
+    fill_rgb: [0, 0, 0]
+    feather_px: 0           # Hard mask edge for deterministic pixel output.
+  augment:
+    enabled: false         # Smoke tests must be deterministic.

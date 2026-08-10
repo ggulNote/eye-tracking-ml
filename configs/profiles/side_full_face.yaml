@@ -1,0 +1,136 @@
+# Side-phone profile that keeps the full profile face as the visual representation.
+# For paired custom data, also merge configs/profiles/dual_view_images.yaml.
+# Status: preprocessing and the input contract are implemented.
+# Planned: WebEyeTrack weight importing, model training, and evaluation.
+
+experiment:
+  name: dual_view_side_full_face_experimental
+  description: "Dual-view gaze with a side full-face crop and metric head pose"
+  tags:
+    side_representation: full_face
+    side_preprocessing_contract: side_full_face_v1
+
+data:
+  views:
+    available: [front, side]
+
+preprocessing:
+  branch_overrides:
+    side:
+      enabled: true
+      representation: side_full_face_v1
+
+      face_landmarks:
+        enabled: true
+        source: mediapipe_face_landmarker
+        model_path: "${oc.env:MEDIAPIPE_FACE_MODEL,./models/face_landmarker_v2_with_blendshapes.task}"
+        expected_landmarks: 478
+        output_uvz: true
+        output_visibility_presence: true
+        output_face_transform: true
+        mirror_retry: true
+        on_failure: mark_invalid
+
+      eye_selection:
+        enabled: true
+        mode: best_visible
+        target_eye: auto
+        min_visibility: 0.60
+        canonicalize_to: none
+        on_failure: mark_invalid
+
+      eye_state:
+        enabled: true
+        method: ear
+        threshold: 0.20
+        required_eye_policy: selected_eye_open
+        on_closed: mark_invalid
+        landmark_indices:
+          left: [362, 385, 387, 263, 373, 380]
+          right: [133, 158, 160, 33, 144, 153]
+        on_failure: mark_invalid
+
+      metric_head_pose:
+        enabled: true
+        method: webeyetrack_radial_procrustes
+        output_unit: cm
+        output_representation: webeyetrack_components
+        face_origin_source: annotation_or_reconstruct
+        annotation_unit: mm
+        required_irises: selected_eye
+        iris_diameter_cm: 1.20
+        initial_depth_cm: 60.0
+        max_iterations: 10
+        max_depth_step_cm: 5.0
+        keep_metric_face: false
+        on_failure: mark_invalid
+
+      eye_region_warp:
+        enabled: false
+      face_roi:
+        enabled: true
+        source: landmarks_bbox
+        mode: crop
+        # Extra context around the landmark bounding box.
+        margin_ratio: 0.30
+        # Keep batch shape stable; invalid samples become black and are loss-masked.
+        on_failure: mark_invalid
+      background_mask:
+        enabled: false
+      resize:
+        enabled: true
+        size_hw: [224, 224]
+        keep_aspect_ratio: true
+        pad_rgb: [0, 0, 0]
+      normalize:
+        enabled: true
+        mode: zero_one
+        output_dtype: float32
+        channel_order: CHW
+
+model:
+  side:
+    enabled: true
+    initialization:
+      mode: custom_backbone
+      allowed_modes: [custom_backbone, webeyetrack_encoder_transfer]
+      webeyetrack_encoder_transfer:
+        path: "${oc.env:WEBEYETRACK_WEIGHTS,./models/blazegaze_mpiifacegaze.keras}"
+        source_framework: tensorflow_keras
+        # Set this when the TensorFlow-to-PyTorch importer is implemented.
+        importer_entrypoint: null
+        load_scope: convolutional_encoder_only
+        reinitialize_shape_dependent_layers: true
+        allow_representation_shift: false
+    compatibility:
+      preprocessing_id: side_full_face_v1
+      on_mismatch: error
+    input_contract:
+      image_key: side_image
+      shape: [B, 3, 224, 224]
+      dtype: float32
+      color_order: RGB
+      value_range: [0.0, 1.0]
+      validity_key: side_gaze_valid
+      auxiliary_keys:
+        head_vector:
+          key: side_head_vector
+          shape: [B, 3]
+          coordinate_system: camera
+        face_origin_3d:
+          key: side_face_origin_3d
+          shape: [B, 3]
+          unit: cm
+          coordinate_system: camera
+    output_contract:
+      gaze_key: gaze_xy
+      gaze_shape: [B, 2]
+      embedding_key: side_embedding
+      embedding_shape: [B, D_side]
+      uncertainty_key: null
+
+loss:
+  branch_auxiliary:
+    enabled: true
+    side_weight: 1.0
+    side_mask_key: side_gaze_valid

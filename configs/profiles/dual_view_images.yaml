@@ -1,0 +1,40 @@
+# Data-only profile for explicitly paired webcam(front) + phonecam(side) images.
+# Add blazegaze.yaml and side_profile_90.yaml for the current preprocessing
+# contracts. Model training and fusion execution are not implemented yet.
+# Recommended merge order: base -> this data profile -> front -> side profile.
+
+experiment:
+  name: dual_view_images                 # MLflow/output grouping before model profiles override it.
+  description: "Explicitly paired webcam/phonecam still-image dataset"
+  tags:
+    dataset: custom_dual_view
+    views: front_side
+
+data:
+  dataset_name: custom_dual_view
+  reader:
+    type: generic_csv                    # Read one canonical CSV row per image/view.
+    manifest_path: "${oc.env:DUAL_VIEW_MANIFEST,./data/dual_view_manifest.csv}"
+    verify_image_exists: true            # Fail when an image path is missing.
+    verify_image_shape: true             # Read image dimensions during prepare.
+    target_bounds_policy: error          # Reject screen targets outside the declared screen.
+  views:
+    # source_to_branch maps manifest values; directory_to_branch documents folder names.
+    available: [front, side]
+    source_to_branch:
+      webcam: front
+      phonecam: side
+    directory_to_branch:
+      webcam: front
+      phonecam: side
+  pairing:
+    enabled: true                        # Build complete front/side image pairs.
+    unit: image                          # One pair represents one synchronized still-image event.
+    strategy: explicit_pair_id           # Never infer pairs from filename or ordering.
+    pair_id_key: pair_id                 # CSV column shared by the two views.
+    require_same_subject: true           # Block cross-person pairs.
+    require_same_target: true            # Both views must share the same screen target.
+    max_target_distance_normalized: 0.0  # Allowed target mismatch after normalization.
+    unpaired_policy: branch_only         # Keep unpaired rows for branch-only use, not fusion.
+    # Retained as a future fusion-report policy; pairing metadata is already produced.
+    exclude_unpaired_from_fusion_metrics: true

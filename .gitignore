@@ -1,0 +1,52 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+.ipynb_checkpoints/
+.demo/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets and local overrides
+.env
+*.local.yaml
+
+# Raw/derived biometric data at the repository root
+/data/
+
+# Experiment artifacts and weights
+outputs/
+mlruns/
+mlflow.db
+mlflow.db-shm
+mlflow.db-wal
+mlflow.db-journal
+weights/
+models/
+*.pt
+*.pth
+*.ckpt
+*.keras
+*.h5
+*.task
+*.pkl
+*.pickle
+*.safetensors
+*.onnx
+
+# Local reference documents
+*.pdf

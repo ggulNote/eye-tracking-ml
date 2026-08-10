@@ -1,0 +1,197 @@
+# Strict 90-degree phone-camera profile using annotation-first visible-eye geometry.
+# Merge after dual_view_images.yaml and blazegaze.yaml. Unlike the front branch, this
+# profile intentionally does not require MediaPipe's 478-point face mesh.
+# Implemented: annotation-first eye ROI and selectable feature tensors.
+# Not implemented: weight importer, SideModel forward, training, and evaluation.
+
+experiment:
+  # Separate output/MLflow group for the strict-profile pipeline.
+  name: dual_view_profile90
+  description: "Exact front BlazeGaze input plus strict-profile one-eye side input"
+  tags:
+    side_geometry: strict_profile_90
+    side_preprocessing_contract: profile90_selectable_features_v3
+
+data:
+  views:
+    available: [front, side]
+
+preprocessing:
+  branch_overrides:
+    side:
+      enabled: true
+      representation: profile90_selectable_features_v3
+
+      # A true profile may expose only one eye, so the frontal 478-point mesh is
+      # not a prerequisite. Eye/head annotations may later come from a dedicated
+      # profile detector, but their canonical keys remain identical.
+      face_landmarks:
+        enabled: false
+      eye_selection:
+        enabled: false
+      eye_state:
+        enabled: false
+      metric_head_pose:
+        enabled: false
+
+      eye_region_warp:
+        # This stage always emits side_image; feature flags below affect auxiliaries only.
+        enabled: true
+        method: profile90_annotation
+        # Final visible-eye tensor [height,width].
+        size_hw: [128, 256]
+        # Metadata keys expected from each strict-profile annotation row.
+        bbox_key: visible_eye_bbox_xyxy
+        eyelid_keypoints_key: visible_eye_keypoints_xy
+        iris_center_key: iris_center_xy
+        head_origin_key: profile_head_origin_xy
+        head_forward_key: profile_head_forward_xy
+        # Six eyelid points define a roll-aligned 2:1 crop. If only a bbox is
+        # available, the bbox scale is used instead and EAR cannot be computed.
+        crop_mode: affine
+        # Eye-width/eye-opening multipliers used to size the affine crop.
+        landmark_crop_scale_xy: [2.4, 1.2]
+        # This is an initial side-view threshold and must be calibrated on the
+        # phone-camera validation split instead of assumed equal to front EAR.
+        ear_threshold: 0.20
+        # a0=p4 temporal corner, a1=p3 upper neighbor, a2=p5 lower neighbor.
+        eyelid_tail_indices: [3, 2, 4]
+        # These toggles select auxiliary features only. The eye ROI above is
+        # always produced as side_image regardless of all three values.
+        feature_extraction:
+          side_headpose:
+            # true appends one head feature tensor to the SideModel input.
+            enabled: true
+            # side_2d: use ear/tragion -> nose image-plane unit vector.
+            # front_3d: use paired front_head_vector; pairing and the front
+            # metric-head-pose stage must both be enabled.
+            source: side_2d
+            side_2d_key: side_head_pose_2d
+            front_3d_key: front_head_vector
+            # Paired front orientation must be valid before it can replace side_2d.
+            front_3d_validity_key: front_head_orientation_valid
+            front_3d_coordinate_frame: front_camera
+            # Invalid/missing front orientation is replaced with a finite zero
+            # vector before forward and excluded through side_gaze_valid.
+            front_3d_invalid_policy: zero_fill_and_mask
+          side_eyeangle:
+            # true emits two normalized direction angles: a0->a1 and a0->a2.
+            enabled: true
+            key: side_eye_angles
+          side_eyelidangle:
+            # Despite the legacy toggle name, this feature is iris-relative pose.
+            enabled: true
+            # User-facing toggle name retained; the canonical tensor name says
+            # explicitly that this feature is iris-based, not eyelid-only.
+            key: side_iris_pose_2d
+            vertical_only: true  # true zeroes the horizontal component and keeps vertical cue.
+        # Fallback bbox expansion [width,height] when six eyelid points are unavailable.
+        bbox_scale_xy: [1.25, 1.50]
+        pad_rgb: [0, 0, 0]  # Fill affine regions outside the source image with black.
+        # Closed/failed samples remain finite black tensors but are validity-masked.
+        on_closed: mark_invalid
+        on_failure: mark_invalid
+
+      face_roi:
+        enabled: false
+      background_mask:
+        enabled: false
+      resize:
+        enabled: false
+      normalize:
+        # uint8 RGB -> float32 CHW in [0,1].
+        enabled: true
+        mode: zero_one
+        output_dtype: float32
+        channel_order: CHW
+
+model:
+  side:
+    enabled: true
+    initialization:
+      # [미구현] Transfer only shape-compatible convolutional encoder layers.
+      mode: webeyetrack_encoder_transfer
+      source_framework: tensorflow_keras
+      path: "${oc.env:WEBEYETRACK_WEIGHTS,./models/blazegaze_mpiifacegaze.keras}"
+      load_scope: convolution_depthwise_batchnorm_encoder
+      # The official 512-D gaze MLP is incompatible with the 256-D one-eye
+      # embedding and is therefore always reinitialized.
+      reinitialize: [spatial_projection, gaze_mlp, gaze_output]
+      # package.module:callable hook for the future Keras-to-PyTorch importer.
+      importer_entrypoint: null
+    compatibility:
+      # Reject weights/models declared for another preprocessing representation.
+      preprocessing_id: profile90_selectable_features_v3
+      on_mismatch: error
+    input_contract:
+      # resolve_model_forward_keys() always starts with side_image and appends
+      # only features whose enabled flag above is true.
+      forward_keys: auto
+      # side_image is always present; optional keys follow feature_extraction.enabled.
+      image_key: side_image
+      shape: [B, 3, 128, 256]
+      dtype: float32
+      color_order: RGB
+      value_range: [0.0, 1.0]
+      validity_key: side_gaze_valid
+      # Validity masks supervision/fusion but is not itself a neural-network input.
+      validity_role: loss_metric_fusion_mask
+      validity_passed_to_model: false
+      auxiliary_keys:
+        # These entries document shapes/coordinates; toggles above select actual inputs.
+        side_headpose:
+          enabled_from: preprocessing.branch_overrides.side.eye_region_warp.feature_extraction.side_headpose.enabled
+          source_from: preprocessing.branch_overrides.side.eye_region_warp.feature_extraction.side_headpose.source
+          side_2d:
+            key: side_head_pose_2d
+            shape: [B, 2]
+            coordinate_system: source_image_plane_x_right_y_down
+            meaning: unit_vector_from_profile_head_origin_to_nose_tip
+          front_3d:
+            key: front_head_vector
+            shape: [B, 3]
+            coordinate_system: front_camera
+            validity_key: front_head_orientation_valid
+            invalid_policy: zero_fill_and_mask
+            requires_paired_front: true
+        side_eyeangle:
+          key: side_eye_angles
+          shape: [B, 2]
+          dtype: float32
+          value_range: [-1.0, 1.0]
+          unit: radians_divided_by_pi
+          order: [a0_to_a1_upper, a0_to_a2_lower]
+          coordinate_system: semantic_eye_local_x_inward_y_upper_to_lower
+        side_eyelidangle:
+          key: side_iris_pose_2d
+          shape: [B, 2]
+          dtype: float32
+          coordinate_system: eye_aligned_image_plane_x_right_y_down
+          meaning: iris_minus_eyelid_center_normalized_by_eye_width_and_opening
+          vertical_only: true
+      diagnostics:
+        # Diagnostics are logged/visualized and never passed to the model.
+        ear:
+          key: side_ear
+          role: selected_eye_open_closed_quality
+          passed_to_model: false
+        selected_eye:
+          key: side_selected_eye_index
+          role: annotation_traceability
+          passed_to_model: false
+        eyelid_tail_vectors:
+          role: construct_and_visualize_two_eye_direction_angles
+          passed_to_model: false
+    output_contract:
+      # Planned SideModel output: normalized gaze [x,y] plus 256-D embedding.
+      gaze_key: gaze_xy
+      gaze_shape: [B, 2]
+      embedding_key: side_embedding
+      embedding_shape: [B, 256]
+
+loss:
+  # [미구현] Side branch supervision uses only rows with side_gaze_valid=true.
+  branch_auxiliary:
+    enabled: true
+    side_weight: 1.0
+    side_mask_key: side_gaze_valid

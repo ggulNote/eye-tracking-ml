@@ -1,0 +1,199 @@
+# Exact front-view input contract for the current WebEyeTrack Python implementation.
+# Merge this over ../config.yaml. The preprocessing executor produces the
+# WebEyeTrack-compatible tensors; loading the official TensorFlow checkpoint in
+# a PyTorch model still requires the configured model adapter.
+# Implemented: preprocessing and input-contract validation.
+# Not implemented: checkpoint importer, model forward, training, and evaluation.
+
+experiment:
+  name: mpiifacegaze_blazegaze_representation
+  description: "WebEyeTrack-compatible front eye-patch representation learning"
+  tags:
+    reference: arxiv_2508_19544v1
+    reference_repository: RedForestAI_WebEyeTrack
+    model_family: BlazeGaze
+    preprocessing_contract: webeyetrack_eye_patch_v1
+    training_stage: representation_learning
+
+preprocessing:
+  branch_overrides:
+    front:
+      enabled: true
+      # Stable ID checked against the model input contract.
+      representation: webeyetrack_eye_patch_v1
+
+      face_landmarks:
+        # mark_invalid policies keep the row but clear gaze validity for supervision.
+        enabled: true
+        source: mediapipe_face_landmarker
+        # Environment variable overrides the bundled/default MediaPipe task file.
+        model_path: "${oc.env:MEDIAPIPE_FACE_MODEL,./models/face_landmarker_v2_with_blendshapes.task}"
+        expected_landmarks: 478
+        # Retain depth, confidence, and face transform required by later geometry stages.
+        output_uvz: true
+        output_visibility_presence: true
+        output_face_transform: true
+        on_failure: mark_invalid
+
+      eye_selection:
+        enabled: true
+        mode: both
+        target_eye: null
+        # Reject either front eye when its landmark visibility falls below this score.
+        min_visibility: 0.60
+        canonicalize_to: none  # Preserve anatomical left/right orientation.
+        on_failure: mark_invalid
+
+      eye_state:
+        enabled: true
+        method: ear
+        # Initial EAR cutoff; calibrate this on the validation subjects.
+        threshold: 0.20
+        # WebEyeTrack suppresses gaze when either front-view eye is closed.
+        required_eye_policy: all_open
+        on_closed: mark_invalid
+        landmark_indices:
+          left: [362, 385, 387, 263, 373, 380]
+          right: [133, 158, 160, 33, 144, 153]
+        on_failure: mark_invalid
+
+      metric_head_pose:
+        enabled: true
+        method: webeyetrack_radial_procrustes
+        output_unit: cm
+        # The official current .keras model consumes head_vector and face_origin_3d.
+        output_representation: webeyetrack_components
+        face_origin_source: annotation_or_reconstruct
+        # MPIIFaceGaze annotation units are converted from mm to output_unit cm.
+        annotation_unit: mm
+        required_irises: both
+        # Metric scale assumption followed by bounded iterative depth refinement.
+        iris_diameter_cm: 1.20
+        initial_depth_cm: 60.0
+        max_iterations: 10
+        max_depth_step_cm: 5.0
+        keep_metric_face: false
+        on_failure: mark_invalid
+
+      eye_region_warp:
+        enabled: true
+        method: webeyetrack_obtain_eyepatch_v1
+        # Official landmark indices are fixed in code; only real runtime knobs remain here.
+        face_crop_size: 512               # Intermediate square face warp size.
+        radial_padding_xy: [0.40, 0.20]   # Horizontal/vertical expansion around the face quad.
+        size_hw: [128, 512]               # Final binocular eye-strip H,W.
+        on_failure: mark_invalid
+
+      face_roi:
+        enabled: false
+      background_mask:
+        enabled: false
+      resize:
+        # The WebEyeTrack warp already emits the final model size.
+        enabled: false
+      normalize:
+        enabled: true
+        mode: zero_one
+        output_dtype: float32
+        channel_order: CHW
+
+data:
+  dataloader:
+    # Lower than the generic baseline because the 128x512 strip uses more memory.
+    batch_size: 8
+
+model:
+  front:
+    enabled: true
+    # Optional external-code root and package.module:callable factory/adapter hooks.
+    source_dir: null
+    entrypoint: null
+    adapter_entrypoint: null
+    compatibility:
+      # Fail instead of silently feeding a mismatched image representation.
+      preprocessing_id: webeyetrack_eye_patch_v1
+      official_framework: tensorflow_keras
+      on_mismatch: error
+    initialization:
+      # Planned importer should load the complete official Keras model.
+      mode: webeyetrack_checkpoint
+      load_scope: full_model
+      importer_entrypoint: null
+    pretrained:
+      # Override the local .keras path with WEBEYETRACK_WEIGHTS when needed.
+      path: "${oc.env:WEBEYETRACK_WEIGHTS,./models/blazegaze_mpiifacegaze.keras}"
+      # Fill with a 64-character digest to pin an exact checkpoint.
+      sha256: null
+      strict: true  # Require exact checkpoint names/shapes when importer exists.
+    input_contract:
+      # Canonical PyTorch layout; a TensorFlow adapter transposes to NHWC.
+      # validity_key masks closed/failed samples from loss and metrics.
+      image_key: front_image
+      shape: [B, 3, 128, 512]
+      dtype: float32
+      color_order: RGB
+      value_range: [0.0, 1.0]
+      validity_key: front_gaze_valid
+      auxiliary_keys:
+        # Camera-frame head direction and metric face origin accompany the RGB strip.
+        head_vector:
+          key: front_head_vector
+          shape: [B, 3]
+          coordinate_system: camera
+        face_origin_3d:
+          key: front_face_origin_3d
+          shape: [B, 3]
+          unit: cm
+          coordinate_system: camera
+    output_contract:
+      # Planned forward returns 2D gaze, a 512-D embedding, and reconstruction.
+      gaze_key: gaze_xy
+      gaze_shape: [B, 2]
+      embedding_key: front_embedding
+      embedding_shape: [B, 512]
+      reconstruction_key: reconstructed_eye_region
+
+training:
+  # [미구현] Representation-learning stage epoch budget.
+  max_epochs: 20
+
+optimizer:
+  # [미구현] Paper-compatible Adam settings.
+  name: Adam
+  learning_rate: 0.001
+  weight_decay: 0.0
+
+scheduler:
+  # [미구현] Multiply learning rate by gamma after every epoch.
+  enabled: true
+  name: ExponentialLR
+  gamma: 0.95
+  monitor: null
+
+loss:
+  # [미구현] Three equally weighted representation-learning objectives.
+  primary:
+    name: weighted_l2_xy
+    prediction_key: gaze_xy
+    target_key: target_gaze_xy
+    mask_key: front_gaze_valid
+    weight: 1.0
+    sample_weight_key: gaze_region_inverse_frequency
+    # 30x30 screen bins up-weight gaze regions that occur less often.
+    frequency_grid_size: [30, 30]
+    delta: null  # Unused by weighted L2; retained from the common loss contract.
+  reconstruction:
+    enabled: true
+    name: mse
+    prediction_key: reconstructed_eye_region
+    target_key: front_image
+    weight: 1.0
+  embedding_consistency:
+    enabled: true
+    name: gaze_distance_consistency
+    embedding_key: front_embedding
+    target_key: target_gaze_xy
+    mask_key: front_gaze_valid
+    weight: 1.0
+
+# Stage 2 first-order MAML still requires a separate subject support/query profile.
