@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
-from .calibration_assets import inspect_calibration_assets
+from .calibration_assets import copy_calibration_assets, inspect_calibration_assets
 from .camera import probe_camera_indices
 from .collection import run_real_protocols, run_simulation_protocols
 from .config import CaptureConfig, load_capture_config
@@ -71,10 +71,8 @@ def run_collection(args: argparse.Namespace) -> Path:
     config_path = Path(args.config).expanduser().resolve()
     config = _apply_dataset_override(load_capture_config(config_path), args.dataset_root)
     participant_id = _participant_from_args(args.participant, config.dataset.root_directory)
-    calibration_directory = (
-        config.dataset.root_directory.expanduser().resolve() / participant_id / "Calibration"
-    )
-    calibration = inspect_calibration_assets(calibration_directory)
+    calibration_source = config.dataset.calibration_source_directory
+    calibration = inspect_calibration_assets(calibration_source)
     calibration_override = bool(args.allow_missing_calibration and not args.simulate)
     if (
         config.dataset.require_calibration_assets
@@ -85,10 +83,13 @@ def run_collection(args: argparse.Namespace) -> Path:
         raise ValueError(
             "Required calibration assets are missing or invalid under %s. "
             "Set dataset.require_calibration_assets=false only for collection tests."
-            % calibration_directory
+            % calibration_source
         )
 
     paths = create_participant_paths(config.dataset.root_directory, participant_id)
+    if not args.simulate:
+        copy_calibration_assets(calibration_source, paths.calibration_directory)
+        calibration = inspect_calibration_assets(paths.calibration_directory)
 
     plans = select_protocols(build_protocol_plans(config.protocols), args.protocol or ["all"])
     participant_metadata = load_optional_metadata(args.participant_metadata)

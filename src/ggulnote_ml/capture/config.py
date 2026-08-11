@@ -42,6 +42,7 @@ class RecordingConfig:
 @dataclass(frozen=True)
 class DatasetConfig:
     root_directory: Path
+    calibration_source_directory: Path
     require_calibration_assets: bool
 
 
@@ -224,6 +225,11 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
     dataset_root = Path(str(_required(dataset_raw, "root_directory", "dataset")))
     if not dataset_root.is_absolute():
         dataset_root = project_root / dataset_root
+    calibration_source = Path(
+        str(_required(dataset_raw, "calibration_source_directory", "dataset"))
+    )
+    if not calibration_source.is_absolute():
+        calibration_source = project_root / calibration_source
 
     preview_raw = _mapping(raw, "preview")
     preview_duration_ms = float(
@@ -312,6 +318,7 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
         ),
         dataset=DatasetConfig(
             root_directory=dataset_root.resolve(),
+            calibration_source_directory=calibration_source.resolve(),
             require_calibration_assets=bool(
                 _required(dataset_raw, "require_calibration_assets", "dataset")
             ),

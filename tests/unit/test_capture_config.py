@@ -13,6 +13,8 @@ def test_capture_config_loads_required_camera_roles_and_protocols():
         ("webcam_front", 1),
         ("iphone_left", 0),
     ]
+    assert config.dataset.calibration_source_directory.name == "macbook_air_m5_13_iphone16"
+    assert config.display.canvas_height == 1248
     assert config.protocols.train_static.columns == 3
     assert config.protocols.train_static.rows == 9
     assert config.protocols.train_static.repeats == 1
