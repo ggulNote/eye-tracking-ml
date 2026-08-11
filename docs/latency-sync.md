@@ -27,6 +27,78 @@ phonecam_timestamp
 - 보정 프레임과 좌표는 `synchronized/synchronized_frames.csv`에 새로 저장합니다.
 - 모든 계산은 정수 나노초로 수행하고, 표시용 통계만 밀리초로 변환합니다.
 
+## 검정·흰색 전환 측정
+
+기본 프로토콜은 검은 화면에서 시작해 800ms마다 검정과 흰색을 15회 전환합니다. 처음 1초는 검정 기준 밝기를 수집하고 마지막 전환 후 800ms를 추가 기록합니다. 참가자는 화면 중앙의 작은 반대색 점을 계속 응시합니다.
+
+```text
+초기 검정: 1.0초
+전환: 15회 × 0.8초 간격
+마지막 기록: 0.8초
+전체: 약 13초
+```
+
+카메라는 참가자 얼굴을 계속 촬영합니다. 검정·흰색 화면의 빛이 얼굴에 반사되면서 생기는 중앙 ROI 평균 밝기 변화를 사용하므로, 측정 중 카메라를 화면 쪽으로 돌리지 않습니다.
+
+실제 측정:
+
+```bash
+python -m ggulnote_ml.synchronization \
+  --participant p00 \
+  --capture-config configs/capture.yaml \
+  --latency-config configs/latency.yaml
+```
+
+카메라 없는 simulation:
+
+```bash
+python -m ggulnote_ml.synchronization \
+  --simulate \
+  --participant p00 \
+  --dataset-root /private/tmp/gaze-latency-simulation
+```
+
+## 밝기 변화 검출
+
+각 후보 프레임에서 설정된 개수의 이전·이후 프레임 평균을 비교합니다. 흰색 전환은 양의 밝기 변화, 검정 전환은 음의 밝기 변화를 찾습니다.
+
+- `min_brightness_change`보다 작은 변화는 무효
+- `max_latency_ms` 이후의 프레임은 검색하지 않음
+- 같은 프레임을 여러 전환에 사용하지 않음
+- 유효 latency의 중앙값에서 MAD 기반으로 먼 값은 outlier 처리
+- `min_valid_events`보다 적으면 최종 `latency.json`을 만들지 않음
+
+최종 통계는 카메라마다 별도로 계산합니다.
+
+```text
+median_ms
+mad_ms
+p95_ms
+valid_events
+total_events
+```
+
+## 출력 구조
+
+```text
+p00/Calibration/
+├── latency.json                         # 유효한 최종 결과만 생성
+└── latency_runs/latency_<UTC>/
+    ├── capture_config.yaml
+    ├── latency_config.yaml
+    ├── display_events.csv
+    ├── webcam_brightness.csv
+    ├── phonecam_brightness.csv
+    ├── detections.csv
+    ├── webcam.mp4                       # 실제 측정만 생성
+    ├── phonecam.mp4                     # 실제 측정만 생성
+    ├── webcam_timestamps.csv            # 실제 측정만 생성
+    ├── phonecam_timestamps.csv          # 실제 측정만 생성
+    └── result.json
+```
+
+유효한 `Calibration/latency.json`은 덮어쓰지 않습니다. 검출에 실패하거나 중단한 실행은 run 디렉터리에 진단 자료만 남기며, 설정을 조정한 뒤 새 run으로 다시 측정할 수 있습니다.
+
 ## Simulation
 
 simulation의 `display_timestamp`는 다음 식으로 생성합니다.
@@ -39,9 +111,7 @@ base_unix_timestamp_ns + frame * frame_interval_ns
 
 ## 다음 구현 단계
 
-1. 검정·흰색 전환 이벤트와 영상 밝기 변화 검출
-2. 카메라별 median, MAD, p95 레이턴시 계산
-3. 보정 timestamp 계산
-4. 단조·일대일 최근접 프레임 매칭
-5. 동적 target 좌표 보간
-6. `synchronized_frames.csv` 생성
+1. 보정 timestamp 계산
+2. 단조·일대일 최근접 프레임 매칭
+3. 동적 target 좌표 보간
+4. `synchronized_frames.csv` 생성

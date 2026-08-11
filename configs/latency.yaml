@@ -1,0 +1,28 @@
+protocol:
+  transition_count: 15
+  initial_dark_ms: 1000
+  transition_interval_ms: 800
+  tail_duration_ms: 800
+  dark_bgr: [0, 0, 0]
+  light_bgr: [255, 255, 255]
+  fixation_radius_px: 8
+
+detection:
+  # 얼굴이 위치하는 중앙 영역의 평균 밝기를 사용합니다.
+  roi_norm: [0.2, 0.15, 0.8, 0.9]
+  comparison_window_frames: 2
+  # 실제 얼굴 반사 변화가 약 2.9~4.0이어서 2.5 이상을 유효 신호로 봅니다.
+  min_brightness_change: 2.5
+  max_latency_ms: 600
+  mad_multiplier: 3.5
+  min_valid_events: 8
+
+simulation:
+  fps: 30
+  webcam_latency_ms: 80
+  phonecam_latency_ms: 140
+  dark_brightness: 30
+  light_brightness: 220
+  noise_std: 1.0
+  random_seed: 20260811
+  base_unix_timestamp_ns: 1700000000000000000
