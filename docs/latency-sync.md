@@ -29,13 +29,13 @@ phonecam_timestamp
 
 ## 검정·흰색 전환 측정
 
-기본 프로토콜은 검은 화면에서 시작해 800ms마다 검정과 흰색을 15회 전환합니다. 처음 1초는 검정 기준 밝기를 수집하고 마지막 전환 후 800ms를 추가 기록합니다. 참가자는 화면 중앙의 작은 반대색 점을 계속 응시합니다.
+기본 프로토콜은 검은 화면에서 시작해 800ms마다 검정과 흰색을 15회 전환합니다. 처음 5초는 착석·카메라 노출 안정화를 위한 검정 기준 구간이며 마지막 전환 후 800ms를 추가 기록합니다. 참가자는 화면 중앙의 작은 반대색 점을 계속 응시합니다.
 
 ```text
-초기 검정: 1.0초
+초기 검정: 5.0초
 전환: 15회 × 0.8초 간격
 마지막 기록: 0.8초
-전체: 약 13초
+전체: 약 17초
 ```
 
 카메라는 참가자 얼굴을 계속 촬영합니다. 검정·흰색 화면의 빛이 얼굴에 반사되면서 생기는 중앙 ROI 평균 밝기 변화를 사용하므로, 측정 중 카메라를 화면 쪽으로 돌리지 않습니다.
@@ -60,7 +60,7 @@ python -m ggulnote_ml.synchronization \
 
 ## 밝기 변화 검출
 
-각 후보 프레임에서 설정된 개수의 이전·이후 프레임 평균을 비교합니다. 흰색 전환은 양의 밝기 변화, 검정 전환은 음의 밝기 변화를 찾습니다.
+정면 웹캠과 측면 phonecam은 얼굴 위치가 다르므로 설정에 카메라별 얼굴 ROI와 최소 밝기 변화량을 따로 둡니다. 각 후보 프레임에서 설정된 개수의 이전·이후 프레임 평균을 비교합니다. 흰색 전환은 양의 밝기 변화, 검정 전환은 음의 밝기 변화를 찾습니다.
 
 - `min_brightness_change`보다 작은 변화는 무효
 - `max_latency_ms` 이후의 프레임은 검색하지 않음
@@ -111,7 +111,50 @@ base_unix_timestamp_ns + frame * frame_interval_ns
 
 ## 다음 구현 단계
 
-1. 보정 timestamp 계산
-2. 단조·일대일 최근접 프레임 매칭
-3. 동적 target 좌표 보간
-4. `synchronized_frames.csv` 생성
+유효한 `Calibration/latency.json`과 새 형식의 `labels/labels.csv`가 있으면 다음 명령으로 보정·매칭합니다.
+
+```bash
+python -m ggulnote_ml.synchronization \
+  --synchronize \
+  --participant p00
+```
+
+처리 순서:
+
+1. 웹캠 timestamp에서 웹캠 median latency를 뺍니다.
+2. phonecam timestamp에서 phonecam median latency를 뺍니다.
+3. 보정 timestamp가 가장 가까운 프레임을 시간순·일대일로 선택합니다.
+4. `max_pair_diff_ms`를 넘는 쌍은 `valid_sync=0`으로 표시합니다.
+5. 보정 시각에 해당하는 화면 target을 찾습니다.
+6. 같은 동적 segment의 두 target 사이면 좌표를 선형 보간합니다.
+7. 원본을 건드리지 않고 새 CSV와 요약 JSON을 저장합니다.
+
+```text
+p00/synchronized/
+├── synchronized_frames.csv
+└── synchronization.json
+```
+
+주요 출력 열:
+
+```text
+webcam_corrected_timestamp
+phonecam_corrected_timestamp
+corrected_time_diff_ms
+reference_timestamp
+target_timestamp
+x_norm, y_norm
+target_interpolated
+valid_sync
+valid_target
+valid
+invalid_reason
+```
+
+완료 메시지 구간처럼 target이 없거나 가장 가까운 target과 설정 시간 이상 떨어진 프레임은 원본 행을 보존하되 `valid_target=0`으로 표시합니다.
+
+## 남은 구현 단계
+
+1. 실제 dot test 데이터로 보정 프레임 쌍 검증
+2. 동기화 CSV와 MediaPipe 특징 CSV 결합
+3. 동적 y 구간 균등 샘플링

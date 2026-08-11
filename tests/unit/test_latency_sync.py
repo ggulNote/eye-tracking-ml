@@ -85,8 +85,12 @@ def test_detector_accepts_low_contrast_face_reflection_signal():
         low_contrast_simulation,
         config.simulation.webcam_latency_ms,
     )
+    detection = replace(
+        config.detection,
+        webcam=replace(config.detection.webcam, min_brightness_change=2.5),
+    )
 
-    estimate = estimate_camera_latency("webcam", samples, events, config.detection)
+    estimate = estimate_camera_latency("webcam", samples, events, detection)
 
     assert estimate.status == "valid"
     assert estimate.valid_events >= config.detection.min_valid_events

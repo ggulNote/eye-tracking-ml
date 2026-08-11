@@ -113,6 +113,7 @@ def run_collection(args: argparse.Namespace) -> Path:
                 "width": camera.width,
                 "height": camera.height,
                 "fps": camera.fps,
+                "max_identical_frames": camera.max_identical_frames,
                 "position": "front" if camera.role == "webcam_front" else "participant_left_30_45_deg",
             }
             for camera in config.cameras

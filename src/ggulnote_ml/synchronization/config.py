@@ -19,13 +19,34 @@ class FlashProtocolConfig:
 
 
 @dataclass(frozen=True)
-class DetectionConfig:
+class CameraDetectionConfig:
     roi_norm: Tuple[float, float, float, float]
-    comparison_window_frames: int
     min_brightness_change: float
+
+
+@dataclass(frozen=True)
+class DetectionConfig:
+    webcam: CameraDetectionConfig
+    phonecam: CameraDetectionConfig
+    comparison_window_frames: int
     max_latency_ms: float
     mad_multiplier: float
     min_valid_events: int
+
+    def camera(self, name: str) -> CameraDetectionConfig:
+        if name == "webcam":
+            return self.webcam
+        if name == "phonecam":
+            return self.phonecam
+        raise ValueError("Unknown latency camera: %s" % name)
+
+
+@dataclass(frozen=True)
+class MatchingConfig:
+    max_pair_diff_ms: float
+    max_target_gap_ms: float
+    enforce_one_to_one: bool
+    interpolate_dynamic_targets: bool
 
 
 @dataclass(frozen=True)
@@ -44,6 +65,7 @@ class LatencySimulationConfig:
 class LatencyConfig:
     protocol: FlashProtocolConfig
     detection: DetectionConfig
+    matching: MatchingConfig
     simulation: LatencySimulationConfig
 
 
@@ -69,6 +91,21 @@ def _bgr(value: Any, name: str) -> Tuple[int, int, int]:
     return result
 
 
+def _camera_detection(raw: Dict[str, Any], name: str) -> CameraDetectionConfig:
+    section = "detection.cameras.%s" % name
+    roi_raw = _required(raw, "roi_norm", section)
+    if not isinstance(roi_raw, list) or len(roi_raw) != 4:
+        raise ValueError("%s.roi_norm must contain x0, y0, x1, y1." % section)
+    roi = tuple(float(value) for value in roi_raw)
+    x0, y0, x1, y1 = roi
+    if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
+        raise ValueError("%s.roi_norm must be ordered within [0, 1]." % section)
+    threshold = float(_required(raw, "min_brightness_change", section))
+    if threshold <= 0:
+        raise ValueError("%s.min_brightness_change must be positive." % section)
+    return CameraDetectionConfig(roi_norm=roi, min_brightness_change=threshold)
+
+
 def load_latency_config(path: Path) -> LatencyConfig:
     resolved = path.expanduser().resolve()
     if not resolved.is_file():
@@ -80,6 +117,7 @@ def load_latency_config(path: Path) -> LatencyConfig:
 
     protocol_raw = _mapping(raw, "protocol")
     detection_raw = _mapping(raw, "detection")
+    matching_raw = _mapping(raw, "matching")
     simulation_raw = _mapping(raw, "simulation")
 
     protocol = FlashProtocolConfig(
@@ -106,33 +144,42 @@ def load_latency_config(path: Path) -> LatencyConfig:
     if protocol.fixation_radius_px <= 0:
         raise ValueError("protocol.fixation_radius_px must be positive.")
 
-    roi_raw = _required(detection_raw, "roi_norm", "detection")
-    if not isinstance(roi_raw, list) or len(roi_raw) != 4:
-        raise ValueError("detection.roi_norm must contain x0, y0, x1, y1.")
-    roi = tuple(float(value) for value in roi_raw)
+    camera_detection_raw = _mapping(detection_raw, "cameras")
     detection = DetectionConfig(
-        roi_norm=roi,
+        webcam=_camera_detection(_mapping(camera_detection_raw, "webcam"), "webcam"),
+        phonecam=_camera_detection(_mapping(camera_detection_raw, "phonecam"), "phonecam"),
         comparison_window_frames=int(
             _required(detection_raw, "comparison_window_frames", "detection")
-        ),
-        min_brightness_change=float(
-            _required(detection_raw, "min_brightness_change", "detection")
         ),
         max_latency_ms=float(_required(detection_raw, "max_latency_ms", "detection")),
         mad_multiplier=float(_required(detection_raw, "mad_multiplier", "detection")),
         min_valid_events=int(_required(detection_raw, "min_valid_events", "detection")),
     )
-    x0, y0, x1, y1 = detection.roi_norm
-    if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
-        raise ValueError("detection.roi_norm must be ordered within [0, 1].")
     if detection.comparison_window_frames <= 0:
         raise ValueError("detection.comparison_window_frames must be positive.")
-    if detection.min_brightness_change <= 0 or detection.max_latency_ms <= 0:
-        raise ValueError("Detection thresholds must be positive.")
+    if detection.max_latency_ms <= 0:
+        raise ValueError("Detection maximum latency must be positive.")
     if detection.mad_multiplier <= 0 or detection.min_valid_events <= 0:
         raise ValueError("Detection robust-statistic parameters must be positive.")
     if detection.min_valid_events > protocol.transition_count:
         raise ValueError("detection.min_valid_events cannot exceed transition_count.")
+
+    matching = MatchingConfig(
+        max_pair_diff_ms=float(
+            _required(matching_raw, "max_pair_diff_ms", "matching")
+        ),
+        max_target_gap_ms=float(
+            _required(matching_raw, "max_target_gap_ms", "matching")
+        ),
+        enforce_one_to_one=bool(
+            _required(matching_raw, "enforce_one_to_one", "matching")
+        ),
+        interpolate_dynamic_targets=bool(
+            _required(matching_raw, "interpolate_dynamic_targets", "matching")
+        ),
+    )
+    if matching.max_pair_diff_ms <= 0 or matching.max_target_gap_ms <= 0:
+        raise ValueError("Matching time thresholds must be positive.")
 
     simulation = LatencySimulationConfig(
         fps=float(_required(simulation_raw, "fps", "simulation")),
@@ -157,4 +204,4 @@ def load_latency_config(path: Path) -> LatencyConfig:
     if simulation.noise_std < 0 or simulation.base_unix_timestamp_ns <= 0:
         raise ValueError("Simulation noise and base timestamp are invalid.")
 
-    return LatencyConfig(protocol, detection, simulation)
+    return LatencyConfig(protocol, detection, matching, simulation)

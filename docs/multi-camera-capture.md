@@ -56,6 +56,8 @@ make simulate PARTICIPANT=p00 DATASET_ROOT=/private/tmp/gaze-simulation
 make collect PARTICIPANT=p00
 ```
 
+실제 점 프로토콜 전에 같은 카메라 연결을 유지한 채 5초간 `webcam`과 `phonecam`을 나란히 표시합니다. 두 영상의 역할·구도·초점과 실시간 갱신 여부를 확인하며, 사전 검사가 끝나면 카메라를 다시 열지 않고 바로 점 테스트로 넘어갑니다.
+
 일부 구간만 개발 테스트할 때는 프로토콜을 명시합니다. 실제 참가자 수집에는 기본 `all`을 사용합니다.
 
 ```bash
@@ -71,6 +73,7 @@ make collect PARTICIPANT=p00 ALLOW_MISSING_CALIBRATION=1
 ```
 
 실행 중 `Q` 또는 `Esc`를 누르면 파일을 닫고 `participant.json` 상태를 `aborted`로 기록합니다.
+카메라가 `max_identical_frames`보다 오래 동일 프레임을 반환하면 연결 정지로 판단해 즉시 실패 처리합니다. 해당 촬영본을 사용하지 말고 카메라를 다시 연결한 뒤 레이턴시부터 재측정합니다.
 
 ## 카메라 역할
 

@@ -20,6 +20,7 @@ class CameraConfig:
     height: int
     fps: float
     warmup_frames: int
+    max_identical_frames: int
     mirror: bool
 
 
@@ -27,12 +28,15 @@ class CameraConfig:
 class PreviewConfig:
     enabled: bool
     window_name_prefix: str
+    preflight_duration_ms: float
+    camera_width_px: int
 
 
 @dataclass(frozen=True)
 class RecordingConfig:
     enabled: bool
     video_codec: str
+    timing_mode: str
 
 
 @dataclass(frozen=True)
@@ -198,12 +202,15 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
             height=int(_required(item, "height", section)),
             fps=float(_required(item, "fps", section)),
             warmup_frames=int(_required(item, "warmup_frames", section)),
+            max_identical_frames=int(_required(item, "max_identical_frames", section)),
             mirror=bool(_required(item, "mirror", section)),
         )
         if camera.role not in {"webcam_front", "iphone_left"}:
             raise ValueError("%s.role must be webcam_front or iphone_left." % section)
         if camera.device_index < 0 or camera.width <= 0 or camera.height <= 0 or camera.fps <= 0:
             raise ValueError("%s camera dimensions, fps, and index are invalid." % section)
+        if camera.warmup_frames < 0 or camera.max_identical_frames <= 0:
+            raise ValueError("%s camera warmup and freeze limits are invalid." % section)
         if camera.backend not in SUPPORTED_BACKENDS:
             raise ValueError("%s.backend must be one of %s." % (section, sorted(SUPPORTED_BACKENDS)))
         cameras.append(camera)
@@ -219,10 +226,19 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
         dataset_root = project_root / dataset_root
 
     preview_raw = _mapping(raw, "preview")
+    preview_duration_ms = float(
+        _required(preview_raw, "preflight_duration_ms", "preview")
+    )
+    preview_width_px = int(_required(preview_raw, "camera_width_px", "preview"))
+    if preview_duration_ms < 0 or preview_width_px <= 0:
+        raise ValueError("Preview duration and camera width are invalid.")
     recording_raw = _mapping(raw, "recording")
     codec = str(_required(recording_raw, "video_codec", "recording"))
     if len(codec) != 4:
         raise ValueError("recording.video_codec must contain exactly four characters.")
+    timing_mode = str(_required(recording_raw, "timing_mode", "recording")).strip().lower()
+    if timing_mode not in {"configured", "measured"}:
+        raise ValueError("recording.timing_mode must be configured or measured.")
 
     display_raw = _mapping(raw, "display")
     canvas_width = int(_required(display_raw, "canvas_width", "display"))
@@ -286,10 +302,13 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
         preview=PreviewConfig(
             enabled=bool(_required(preview_raw, "enabled", "preview")),
             window_name_prefix=str(_required(preview_raw, "window_name_prefix", "preview")),
+            preflight_duration_ms=preview_duration_ms,
+            camera_width_px=preview_width_px,
         ),
         recording=RecordingConfig(
             enabled=bool(_required(recording_raw, "enabled", "recording")),
             video_codec=codec,
+            timing_mode=timing_mode,
         ),
         dataset=DatasetConfig(
             root_directory=dataset_root.resolve(),

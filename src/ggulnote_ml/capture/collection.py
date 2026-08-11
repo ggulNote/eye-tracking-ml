@@ -172,14 +172,95 @@ def _collection_recorders(
         paths.webcam_directory / "timestamps.csv",
         config.recording.video_codec,
         fps,
+        config.recording.timing_mode,
     )
     phone = SessionRecorder(
         paths.phone_directory / "capture.mp4",
         paths.phone_directory / "timestamps.csv",
         config.recording.video_codec,
         fps,
+        config.recording.timing_mode,
     )
     return webcam, phone
+
+
+def _preflight_canvas(
+    webcam: FramePacket,
+    phonecam: FramePacket,
+    camera_width_px: int,
+    remaining_seconds: float,
+) -> np.ndarray:
+    """Build a labeled side-by-side preview without modifying source frames."""
+
+    panels = []
+    for label, packet in (("webcam", webcam), ("phonecam", phonecam)):
+        height, width = packet.frame.shape[:2]
+        scale = camera_width_px / float(width)
+        panel = cv2.resize(
+            packet.frame,
+            (camera_width_px, max(1, round(height * scale))),
+        )
+        cv2.putText(
+            panel,
+            label,
+            (16, 32),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+        panels.append(panel)
+    canvas = cv2.hconcat(panels)
+    cv2.putText(
+        canvas,
+        "Camera check %.1fs - keep both feeds moving" % max(0.0, remaining_seconds),
+        (16, canvas.shape[0] - 18),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (0, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    return canvas
+
+
+def _run_camera_preflight(
+    config: CaptureConfig,
+    webcam_source: CameraSource,
+    phone_source: CameraSource,
+) -> None:
+    """Verify both live feeds before recording, without reopening either camera."""
+
+    if not config.preview.enabled or config.preview.preflight_duration_ms == 0:
+        return
+    started_ns = time.monotonic_ns()
+    window_name = "%s - preflight" % config.preview.window_name_prefix
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    try:
+        while True:
+            elapsed_ms = (time.monotonic_ns() - started_ns) / 1_000_000.0
+            if elapsed_ms >= config.preview.preflight_duration_ms:
+                break
+            webcam = webcam_source.read(started_ns)
+            phonecam = phone_source.read(started_ns)
+            remaining_seconds = (config.preview.preflight_duration_ms - elapsed_ms) / 1000.0
+            cv2.imshow(
+                window_name,
+                _preflight_canvas(
+                    webcam,
+                    phonecam,
+                    config.preview.camera_width_px,
+                    remaining_seconds,
+                ),
+            )
+            key = cv2.waitKey(1) & 0xFF
+            if key in {ord("q"), 27}:
+                raise RuntimeError("Camera preflight was aborted.")
+    finally:
+        cv2.destroyWindow(window_name)
+    webcam_source.reset_session()
+    phone_source.reset_session()
 
 
 def _run_real_protocols_inner(
@@ -192,6 +273,7 @@ def _run_real_protocols_inner(
     with ExitStack() as stack:
         webcam_source = stack.enter_context(CameraSource(by_role["webcam_front"]))
         phone_source = stack.enter_context(CameraSource(by_role["iphone_left"]))
+        _run_camera_preflight(config, webcam_source, phone_source)
         collection_started_ns = time.monotonic_ns()
         webcam_recorder, phone_recorder = _collection_recorders(
             config, paths, by_role["webcam_front"].fps

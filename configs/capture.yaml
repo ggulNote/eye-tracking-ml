@@ -14,6 +14,8 @@ cameras:
     height: 720
     fps: 30
     warmup_frames: 5
+    # 센서가 약 1초 이상 같은 프레임만 반환하면 즉시 수집을 중단합니다.
+    max_identical_frames: 15
     mirror: true
   - name: iphone
     role: iphone_left
@@ -23,15 +25,21 @@ cameras:
     height: 720
     fps: 30
     warmup_frames: 5
+    max_identical_frames: 15
     mirror: false
 
 preview:
   enabled: true
   window_name_prefix: Gaze Capture
+  preflight_duration_ms: 5000
+  camera_width_px: 640
 
 recording:
   enabled: true
   video_codec: mp4v
+  # measured: 촬영 종료 후 프레임 타임스탬프로 실제 FPS를 계산하고
+  # MP4 시간축만 보정합니다. 프레임 재압축이나 번호 변경은 없습니다.
+  timing_mode: measured
 
 display:
   window_name: Gaze Collection

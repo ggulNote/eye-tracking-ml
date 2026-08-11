@@ -226,12 +226,14 @@ def run_real_latency_measurement(
             paths.run_directory / "webcam_timestamps.csv",
             capture_config.recording.video_codec,
             by_role["webcam_front"].fps,
+            capture_config.recording.timing_mode,
         )
         phonecam_recorder = SessionRecorder(
             paths.phonecam_video,
             paths.run_directory / "phonecam_timestamps.csv",
             capture_config.recording.video_codec,
             by_role["iphone_left"].fps,
+            capture_config.recording.timing_mode,
         )
         collection_started_ns = time.monotonic_ns()
         next_transition_ns = collection_started_ns + round(
@@ -276,14 +278,20 @@ def run_real_latency_measurement(
                     BrightnessSample(
                         webcam.frame_index,
                         webcam.unix_timestamp_ns,
-                        brightness_from_frame(webcam.frame, latency_config.detection.roi_norm),
+                        brightness_from_frame(
+                            webcam.frame,
+                            latency_config.detection.webcam.roi_norm,
+                        ),
                     )
                 )
                 phonecam_samples.append(
                     BrightnessSample(
                         phonecam.frame_index,
                         phonecam.unix_timestamp_ns,
-                        brightness_from_frame(phonecam.frame, latency_config.detection.roi_norm),
+                        brightness_from_frame(
+                            phonecam.frame,
+                            latency_config.detection.phonecam.roi_norm,
+                        ),
                     )
                 )
                 if len(events) == latency_config.protocol.transition_count:

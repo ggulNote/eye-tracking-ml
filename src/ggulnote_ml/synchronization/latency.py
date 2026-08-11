@@ -110,6 +110,7 @@ def estimate_camera_latency(
     """
 
     _validate_ordered_inputs(samples, events)
+    camera_config = config.camera(camera)
     window = config.comparison_window_frames
     if len(samples) < window * 2:
         raise ValueError("Not enough brightness samples for the comparison window.")
@@ -159,7 +160,7 @@ def estimate_camera_latency(
             continue
         sample = samples[best_index]
         latency_ms = (sample.timestamp_ns - event.display_timestamp_ns) / 1_000_000.0
-        if best_change < config.min_brightness_change:
+        if best_change < camera_config.min_brightness_change:
             detections.append(
                 TransitionDetection(
                     event.event_index,

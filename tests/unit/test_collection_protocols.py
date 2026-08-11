@@ -1,11 +1,14 @@
 import csv
+import json
 from dataclasses import replace
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
 from ggulnote_ml.capture.collection import PairedLabelWriter, run_simulation_protocols
+from ggulnote_ml.capture.camera import FrozenFrameGuard
 from ggulnote_ml.capture.config import load_capture_config
 from ggulnote_ml.capture.contracts import FramePacket
 from ggulnote_ml.capture.dataset import (
@@ -19,6 +22,7 @@ from ggulnote_ml.capture.protocols import (
     build_protocol_plans,
     normalized_coordinates,
 )
+from ggulnote_ml.capture.recorder import SessionRecorder
 
 
 def test_protocol_counts_randomization_and_splits():
@@ -45,6 +49,8 @@ def test_protocol_counts_randomization_and_splits():
     ]
     assert [segment.target_index for segment in train.segments] != list(range(27))
     assert sum(plan.total_duration_ms for plan in (intro, train, transition, dynamic, refix, evaluation)) == 105000
+    assert config.preview.preflight_duration_ms == 5000
+    assert config.preview.camera_width_px == 640
 
 
 def test_static_training_windows_match_protocol_contract():
@@ -175,3 +181,49 @@ def test_label_writer_rejects_invalid_or_decreasing_display_timestamps(tmp_path)
 def test_coordinate_conventions():
     assert normalized_coordinates(0.0, 0.0, 101, 51) == (0, 0, -0.5, -0.5)
     assert normalized_coordinates(1.0, 1.0, 101, 51) == (100, 50, 0.5, 0.5)
+
+
+def test_recorder_uses_measured_timestamps_without_changing_frame_indices(tmp_path):
+    video_path = tmp_path / "capture.mp4"
+    timestamps_path = tmp_path / "timestamps.csv"
+    recorder = SessionRecorder(video_path, timestamps_path, "mp4v", 30.0, "measured")
+    frame = np.zeros((48, 64, 3), dtype=np.uint8)
+    base_ns = 1_700_000_000_000_000_000
+    for index in range(101):
+        recorder.write(
+            FramePacket(index, index * 100.0, base_ns + index * 100_000_000, frame)
+        )
+    recorder.close()
+
+    capture = cv2.VideoCapture(str(video_path))
+    try:
+        encoded_fps = capture.get(cv2.CAP_PROP_FPS)
+        encoded_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    finally:
+        capture.release()
+    assert encoded_frames == 101
+    assert encoded_fps == pytest.approx(10.0, abs=0.1)
+    with timestamps_path.open(encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+    assert [int(row["frame"]) for row in rows] == list(range(101))
+    with (tmp_path / "recording.json").open(encoding="utf-8") as file:
+        summary = json.load(file)
+    assert summary["configured_fps"] == 30.0
+    assert summary["measured_fps"] == pytest.approx(10.0)
+    assert summary["frame_count"] == 101
+
+
+def test_frozen_frame_guard_rejects_stalled_camera_and_resets_on_change():
+    guard = FrozenFrameGuard("phonecam", max_identical_frames=3)
+    still = np.zeros((8, 8, 3), dtype=np.uint8)
+    changed = still.copy()
+    changed[0, 0, 0] = 1
+
+    guard.observe(still)
+    guard.observe(still)
+    guard.observe(changed)
+    guard.observe(still)
+    guard.observe(still)
+    guard.observe(still)
+    with pytest.raises(RuntimeError, match="Camera phonecam appears frozen"):
+        guard.observe(still)
