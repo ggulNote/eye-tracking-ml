@@ -31,6 +31,7 @@ capture = [
 [project.scripts]
 ggulnote-ml = "ggulnote_ml.cli:main"
 ggulnote-capture = "ggulnote_ml.capture.cli:main"
+ggulnote-calibrate = "ggulnote_ml.capture.geometry_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

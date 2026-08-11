@@ -96,6 +96,14 @@ macOS는 `avfoundation`, Linux는 `v4l2`, Windows는 `dshow` backend를 사용�
 
 자세한 설정과 입출력 규격은 [다중 카메라 캡처 문서](docs/multi-camera-capture.md)를 참고합니다.
 
+현재 고정 장비의 체커보드 생성과 카메라 내부 보정은 다음 명령으로 시작합니다.
+
+```bash
+make geometry-board
+```
+
+인쇄 크기 확인부터 두 카메라별 실행 방법은 [카메라 기하 보정 문서](docs/camera-geometry-calibration.md)를 참고합니다.
+
 전체 검증은 다음 명령으로 실행할 수 있습니다.
 
 ```bash
@@ -108,4 +116,5 @@ make check
 - [모델 파이프라인](docs/model-pipeline.md)
 - [WebEyeTrack 입출력 규격](docs/webeyetrack-data-contract.md)
 - [다중 카메라 캡처](docs/multi-camera-capture.md)
+- [카메라 기하 보정](docs/camera-geometry-calibration.md)
 - [협업 규칙](CONTRIBUTING.md)

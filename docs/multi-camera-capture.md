@@ -152,6 +152,8 @@ segment,repeat,target,direction,settling,usable,training
 
 웹캠과 iPhone은 렌즈와 위치가 다르므로 각자의 `Camera.mat`과 `monitorPose.mat`을 별도로 생성해야 합니다.
 
+고정 장비 보정 도구의 인쇄·측정·실행 순서는 [카메라 기하 보정 문서](camera-geometry-calibration.md)를 참고합니다. 장비 공통 보정값은 `data/calibration/setups/macbook_air_m5_13_iphone16/`에 한 번 생성하고, 실제 참가자 수집 시 최종 MAT 파일만 참가자 `Calibration/` 폴더로 복사합니다.
+
 ## 개인정보와 후속 파이프라인
 
 얼굴 영상은 생체·개인정보에 해당할 수 있으므로 연구 동의, 접근 권한, 암호화, 보관 기간 및 폐기 정책을 먼저 확정해야 합니다. 안경·렌즈, 시력 조건, 주사용 손, 조명, 눈–화면 거리 같은 익명 메타데이터는 `--participant-metadata` JSON으로 전달할 수 있습니다.

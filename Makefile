@@ -7,8 +7,10 @@ PARTICIPANT ?=
 PROTOCOL ?=all
 ALLOW_MISSING_CALIBRATION ?=
 DATASET_ROOT ?=
+GEOMETRY_CONFIG ?=configs/geometry_calibration.yaml
+CAMERA ?=
 
-.PHONY: setup setup-video setup-capture collect simulate suggest-participant list-cameras validate preprocess smoke train evaluate predict test check mlflow
+.PHONY: setup setup-video setup-capture collect simulate suggest-participant list-cameras geometry-board geometry-screen geometry-intrinsics geometry-inspect validate preprocess smoke train evaluate predict test check mlflow
 
 setup:
 	python3 -m venv .venv
@@ -37,6 +39,19 @@ suggest-participant:
 
 list-cameras:
 	$(PYTHON) -m ggulnote_ml.capture --config configs/capture.yaml --list-cameras
+
+geometry-board:
+	$(PYTHON) -m ggulnote_ml.capture.geometry_cli --config $(GEOMETRY_CONFIG) generate-board
+
+geometry-screen:
+	$(PYTHON) -m ggulnote_ml.capture.geometry_cli --config $(GEOMETRY_CONFIG) write-screen
+
+geometry-intrinsics:
+	@test -n "$(CAMERA)" || (echo "CAMERA=webcam or CAMERA=phonecam is required" && exit 2)
+	$(PYTHON) -m ggulnote_ml.capture.geometry_cli --config $(GEOMETRY_CONFIG) --capture-config configs/capture.yaml capture-intrinsics --camera $(CAMERA)
+
+geometry-inspect:
+	$(PYTHON) -m ggulnote_ml.capture.geometry_cli --config $(GEOMETRY_CONFIG) inspect
 
 validate:
 	$(PYTHON) -m ggulnote_ml validate-config --config $(CONFIG)

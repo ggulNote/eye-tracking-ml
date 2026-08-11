@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
@@ -17,6 +18,15 @@ STEREO_REQUIRED = (
     "cameraMatrix_iphone",
     "distCoeffs_iphone",
     "stereo_reprojection_error",
+)
+
+CALIBRATION_ASSET_PATHS = (
+    Path("screenSize.mat"),
+    Path("webcam/Camera.mat"),
+    Path("webcam/monitorPose.mat"),
+    Path("phonecam/Camera.mat"),
+    Path("phonecam/monitorPose.mat"),
+    Path("stereoCalibration.mat"),
 )
 
 
@@ -55,3 +65,23 @@ def inspect_calibration_assets(calibration_directory: Path) -> Dict[str, Any]:
         "cameras": cameras,
         "stereo": stereo,
     }
+
+
+def copy_calibration_assets(source: Path, destination: Path) -> None:
+    """Copy only final MAT assets from one fixed rig into a new participant folder."""
+
+    source = source.expanduser().resolve()
+    destination = destination.expanduser().resolve()
+    if source == destination:
+        return
+    for relative_path in CALIBRATION_ASSET_PATHS:
+        source_path = source / relative_path
+        if not source_path.is_file():
+            continue
+        destination_path = destination / relative_path
+        if destination_path.exists():
+            raise FileExistsError(
+                "Participant calibration asset already exists: %s" % destination_path
+            )
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination_path)

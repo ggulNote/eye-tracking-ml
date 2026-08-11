@@ -1,7 +1,10 @@
 import numpy as np
 from scipy.io import savemat
 
-from ggulnote_ml.capture.calibration_assets import inspect_calibration_assets
+from ggulnote_ml.capture.calibration_assets import (
+    copy_calibration_assets,
+    inspect_calibration_assets,
+)
 
 
 def test_calibration_assets_validate_only_consumed_variables(tmp_path):
@@ -41,3 +44,27 @@ def test_calibration_assets_validate_only_consumed_variables(tmp_path):
     assert "unused_variable" in result["cameras"]["webcam_front"]["camera"]["available_variables"]
     assert not result["stereo"]["exists"]
     assert result["stereo"]["optional"]
+
+
+def test_copy_calibration_assets_copies_only_final_mat_files(tmp_path):
+    source = tmp_path / "setup"
+    destination = tmp_path / "participant" / "Calibration"
+    for relative in (
+        "screenSize.mat",
+        "webcam/Camera.mat",
+        "webcam/monitorPose.mat",
+        "phonecam/Camera.mat",
+        "phonecam/monitorPose.mat",
+    ):
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"mat")
+    ignored = source / "webcam" / "intrinsics_runs" / "frame.png"
+    ignored.parent.mkdir(parents=True)
+    ignored.write_bytes(b"image")
+
+    copy_calibration_assets(source, destination)
+
+    assert (destination / "screenSize.mat").read_bytes() == b"mat"
+    assert (destination / "phonecam" / "Camera.mat").read_bytes() == b"mat"
+    assert not (destination / "webcam" / "intrinsics_runs").exists()
