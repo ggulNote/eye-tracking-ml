@@ -23,6 +23,7 @@ video = [
   "opencv-python-headless>=4.10,<5",
 ]
 capture = [
+  "imageio-ffmpeg>=0.6,<1",
   "opencv-python>=4.10,<5",
   "scipy>=1.10,<2",
 ]

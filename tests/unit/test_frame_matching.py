@@ -1,0 +1,133 @@
+import csv
+import json
+from pathlib import Path
+
+import pytest
+
+from ggulnote_ml.synchronization.config import load_latency_config
+from ggulnote_ml.synchronization.matching import synchronize_labels
+
+
+LABEL_COLUMNS = (
+    "participant",
+    "protocol",
+    "split",
+    "frame",
+    "display_timestamp",
+    "webcam_frame",
+    "webcam_timestamp",
+    "phonecam_frame",
+    "phonecam_timestamp",
+    "x_norm",
+    "y_norm",
+    "x_centered",
+    "y_centered",
+    "segment",
+    "repeat",
+    "target",
+    "direction",
+    "settling",
+    "usable",
+    "training",
+)
+
+
+def _write_latency(path: Path, participant: str = "p00") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "status": "valid",
+                "participant": participant,
+                "cameras": {
+                    "webcam": {"median_ms": 100.0},
+                    "phonecam": {"median_ms": 120.0},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_dynamic_labels(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    base = 1_700_000_000_000_000_000
+    with path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=LABEL_COLUMNS)
+        writer.writeheader()
+        for frame in range(4):
+            display = base + frame * 100_000_000
+            scene = display + 50_000_000
+            writer.writerow(
+                {
+                    "participant": "p00",
+                    "protocol": "dynamic_vertical_3col",
+                    "split": "train",
+                    "frame": frame,
+                    "display_timestamp": display,
+                    "webcam_frame": frame,
+                    "webcam_timestamp": scene + 100_000_000,
+                    "phonecam_frame": frame,
+                    "phonecam_timestamp": scene + 120_000_000,
+                    "x_norm": "0.500000",
+                    "y_norm": "%.6f" % (frame * 0.1),
+                    "x_centered": "0.000000",
+                    "y_centered": "%.6f" % (frame * 0.1 - 0.5),
+                    "segment": 0,
+                    "repeat": 0,
+                    "target": 0,
+                    "direction": "top_to_bottom",
+                    "settling": 0,
+                    "usable": 1,
+                    "training": 1,
+                }
+            )
+
+
+def test_synchronization_applies_camera_specific_latency_and_interpolates_dynamic_target(
+    tmp_path,
+):
+    config = load_latency_config(Path("configs/latency.yaml"))
+    labels = tmp_path / "labels.csv"
+    latency = tmp_path / "latency.json"
+    output = tmp_path / "synchronized_frames.csv"
+    _write_dynamic_labels(labels)
+    _write_latency(latency)
+
+    summary = synchronize_labels(labels, latency, output, config.matching)
+
+    assert summary["total_pairs"] == 4
+    assert summary["valid_sync_pairs"] == 4
+    assert summary["valid_pairs"] == 4
+    with output.open(encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+    assert [row["phonecam_frame"] for row in rows] == ["0", "1", "2", "3"]
+    assert {float(row["corrected_time_diff_ms"]) for row in rows} == {0.0}
+    assert float(rows[0]["y_norm"]) == pytest.approx(0.05)
+    assert float(rows[1]["y_norm"]) == pytest.approx(0.15)
+    assert rows[0]["target_interpolated"] == "1"
+    assert rows[-1]["target_interpolated"] == "0"
+
+
+def test_synchronization_refuses_output_overwrite(tmp_path):
+    config = load_latency_config(Path("configs/latency.yaml"))
+    labels = tmp_path / "labels.csv"
+    latency = tmp_path / "latency.json"
+    output = tmp_path / "synchronized_frames.csv"
+    _write_dynamic_labels(labels)
+    _write_latency(latency)
+    synchronize_labels(labels, latency, output, config.matching)
+
+    with pytest.raises(FileExistsError, match="will not be overwritten"):
+        synchronize_labels(labels, latency, output, config.matching)
+
+
+def test_synchronization_rejects_participant_mismatch(tmp_path):
+    config = load_latency_config(Path("configs/latency.yaml"))
+    labels = tmp_path / "labels.csv"
+    latency = tmp_path / "latency.json"
+    _write_dynamic_labels(labels)
+    _write_latency(latency, participant="p01")
+
+    with pytest.raises(ValueError, match="does not match"):
+        synchronize_labels(labels, latency, tmp_path / "out.csv", config.matching)

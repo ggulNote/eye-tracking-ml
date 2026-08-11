@@ -4,6 +4,7 @@ import time
 from typing import Dict, List
 
 import cv2
+import numpy as np
 
 from .config import CameraConfig
 from .contracts import FramePacket
@@ -17,6 +18,35 @@ BACKENDS: Dict[str, int] = {
 }
 
 
+class FrozenFrameGuard:
+    """Fail when a camera repeatedly returns the exact same sensor frame."""
+
+    def __init__(self, camera_name: str, max_identical_frames: int) -> None:
+        if max_identical_frames <= 0:
+            raise ValueError("max_identical_frames must be positive.")
+        self.camera_name = camera_name
+        self.max_identical_frames = max_identical_frames
+        self._previous_frame = None
+        self._identical_count = 0
+
+    def observe(self, frame: np.ndarray) -> None:
+        if self._previous_frame is not None and np.array_equal(frame, self._previous_frame):
+            self._identical_count += 1
+        else:
+            self._identical_count = 0
+        self._previous_frame = frame.copy()
+        if self._identical_count >= self.max_identical_frames:
+            raise RuntimeError(
+                "Camera %s appears frozen: %d consecutive identical frames. "
+                "Reconnect the camera before collecting data."
+                % (self.camera_name, self._identical_count + 1)
+            )
+
+    def reset(self) -> None:
+        self._previous_frame = None
+        self._identical_count = 0
+
+
 class CameraSource:
     """Read one OS camera device while preserving a fixed frame contract."""
 
@@ -24,6 +54,9 @@ class CameraSource:
         self.config = config
         self._capture = None
         self._frame_index = 0
+        self._freeze_guard = FrozenFrameGuard(
+            config.name, config.max_identical_frames
+        )
 
     def __enter__(self) -> "CameraSource":
         capture = cv2.VideoCapture(self.config.device_index, BACKENDS[self.config.backend])
@@ -51,6 +84,7 @@ class CameraSource:
             raise RuntimeError("Could not read a frame from camera %s." % self.config.name)
         if frame.shape[:2] != (self.config.height, self.config.width):
             frame = cv2.resize(frame, (self.config.width, self.config.height))
+        self._freeze_guard.observe(frame)
         packet = FramePacket(
             frame_index=self._frame_index,
             captured_at_ms=(captured_ns - session_started_ns) / 1_000_000.0,
@@ -60,6 +94,12 @@ class CameraSource:
         packet.validate()
         self._frame_index += 1
         return packet
+
+    def reset_session(self) -> None:
+        """Restart frame numbering after an unrecorded camera preflight."""
+
+        self._frame_index = 0
+        self._freeze_guard.reset()
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         if self._capture is not None:

@@ -56,6 +56,8 @@ make simulate PARTICIPANT=p00 DATASET_ROOT=/private/tmp/gaze-simulation
 make collect PARTICIPANT=p00
 ```
 
+실제 점 프로토콜 전에 같은 카메라 연결을 유지한 채 5초간 `webcam`과 `phonecam`을 나란히 표시합니다. 두 영상의 역할·구도·초점과 실시간 갱신 여부를 확인하며, 사전 검사가 끝나면 카메라를 다시 열지 않고 바로 점 테스트로 넘어갑니다.
+
 일부 구간만 개발 테스트할 때는 프로토콜을 명시합니다. 실제 참가자 수집에는 기본 `all`을 사용합니다.
 
 ```bash
@@ -71,6 +73,7 @@ make collect PARTICIPANT=p00 ALLOW_MISSING_CALIBRATION=1
 ```
 
 실행 중 `Q` 또는 `Esc`를 누르면 파일을 닫고 `participant.json` 상태를 `aborted`로 기록합니다.
+카메라가 `max_identical_frames`보다 오래 동일 프레임을 반환하면 연결 정지로 판단해 즉시 실패 처리합니다. 해당 촬영본을 사용하지 말고 카메라를 다시 연결한 뒤 레이턴시부터 재측정합니다.
 
 ## 카메라 역할
 
@@ -122,15 +125,16 @@ make collect PARTICIPANT=p00 ALLOW_MISSING_CALIBRATION=1
 
 ```text
 participant,protocol,split,frame,
+display_timestamp,
 webcam_frame,webcam_timestamp,
-phonecam_frame,phonecam_timestamp,time_diff_ms,latency_ms,
+phonecam_frame,phonecam_timestamp,time_diff_ms,
 x_px,y_px,x_norm,y_norm,x_centered,y_centered,
 segment,repeat,target,direction,settling,usable,training
 ```
 
-- `timestamp`: Unix 나노초 정수
+- `display_timestamp`: 화면 상태를 갱신한 직후 기록한 Unix 나노초 정수
+- `webcam_timestamp`, `phonecam_timestamp`: 프레임을 받은 Unix 나노초 정수
 - `time_diff_ms`: `phonecam_timestamp - webcam_timestamp`
-- `latency_ms`: 동적 정답에 적용한 지연값; 측정 전 기본값은 0
 - `x_norm`, `y_norm`: 좌상단 `(0,0)`, 우하단 `(1,1)`
 - `x_centered`, `y_centered`: 화면 중심 `(0,0)`, 범위 `[-0.5,0.5]`
 - `repeat`: 현재 프로토콜은 1회이지만 규격 확장성을 위해 유지
@@ -152,6 +156,6 @@ segment,repeat,target,direction,settling,usable,training
 
 얼굴 영상은 생체·개인정보에 해당할 수 있으므로 연구 동의, 접근 권한, 암호화, 보관 기간 및 폐기 정책을 먼저 확정해야 합니다. 안경·렌즈, 시력 조건, 주사용 손, 조명, 눈–화면 거리 같은 익명 메타데이터는 `--participant-metadata` JSON으로 전달할 수 있습니다.
 
-현재 모듈은 지속 학습 파이프라인의 **원본 데이터 수집 단계**입니다. 동적 `latency_ms`가 0보다 크면 label 좌표는 화면 표시 시각보다 그만큼 이전인 `target(t-lag)`로 기록됩니다. 실제 lag 값은 별도 레이턴시 측정 단계에서 config에 넣어야 합니다.
+현재 모듈은 지속 학습 파이프라인의 **원본 데이터 수집 단계**입니다. `labels.csv`에는 실제 표시 좌표와 `display_timestamp`를 보정 없이 기록합니다. 실제 lag는 별도 레이턴시 측정 단계에서 계산하고, 보정 결과는 원본을 덮어쓰지 않고 별도의 synchronized CSV로 생성합니다. 세부 계약은 [레이턴시·프레임 동기화 문서](latency-sync.md)를 참고합니다.
 
 이후 MediaPipe 특징 추출, 눈 감김·얼굴 미검출 제거, y축 15~20구간 균등 샘플링, 정적/동적 50:50 배치 구성, 학습 dataset 변환, MLflow 기반 학습·평가·모델 버전 연결을 구현해야 새 참가자 폴더를 추가하는 것만으로 재학습할 수 있습니다. 평가점은 각 점의 안정 구간 예측 중앙값으로 MAE_x, MAE_y, 상·중·하 MAE_y와 predicted-target y 기울기를 계산합니다.

@@ -1,0 +1,39 @@
+protocol:
+  transition_count: 15
+  # 카메라 노출이 안정되고 참가자가 자세를 고정할 준비 시간입니다.
+  initial_dark_ms: 5000
+  transition_interval_ms: 800
+  tail_duration_ms: 800
+  dark_bgr: [0, 0, 0]
+  light_bgr: [255, 255, 255]
+  fixation_radius_px: 8
+
+detection:
+  # 두 카메라의 얼굴 위치가 다르므로 배경을 제외한 ROI를 따로 사용합니다.
+  cameras:
+    webcam:
+      roi_norm: [0.30, 0.18, 0.48, 0.68]
+      min_brightness_change: 0.5
+    phonecam:
+      roi_norm: [0.50, 0.15, 0.72, 0.70]
+      min_brightness_change: 0.5
+  comparison_window_frames: 2
+  max_latency_ms: 600
+  mad_multiplier: 3.5
+  min_valid_events: 8
+
+matching:
+  max_pair_diff_ms: 40
+  max_target_gap_ms: 150
+  enforce_one_to_one: true
+  interpolate_dynamic_targets: true
+
+simulation:
+  fps: 30
+  webcam_latency_ms: 80
+  phonecam_latency_ms: 140
+  dark_brightness: 30
+  light_brightness: 220
+  noise_std: 1.0
+  random_seed: 20260811
+  base_unix_timestamp_ns: 1700000000000000000
