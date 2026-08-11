@@ -2,10 +2,12 @@ import csv
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from ggulnote_ml.capture.collection import run_simulation_protocols
+from ggulnote_ml.capture.collection import PairedLabelWriter, run_simulation_protocols
 from ggulnote_ml.capture.config import load_capture_config
+from ggulnote_ml.capture.contracts import FramePacket
 from ggulnote_ml.capture.dataset import (
     create_participant_paths,
     normalize_participant_id,
@@ -114,8 +116,15 @@ def test_simulation_writes_videos_pair_labels_and_unix_timestamps(tmp_path):
         rows = list(csv.DictReader(file))
     assert rows
     assert rows[0]["participant"] == "p00"
+    display_timestamps = [int(row["display_timestamp"]) for row in rows]
+    assert display_timestamps[0] == config.simulation.base_unix_timestamp_ns
+    assert display_timestamps == sorted(display_timestamps)
+    assert all(
+        int(row["webcam_timestamp"]) >= int(row["display_timestamp"]) for row in rows
+    )
     assert int(rows[0]["webcam_timestamp"]) > 0
     assert float(rows[0]["time_diff_ms"]) == pytest.approx(5.0)
+    assert "latency_ms" not in rows[0]
     assert set(row["split"] for row in rows) == {"train"}
 
 
@@ -143,6 +152,24 @@ def test_multiple_protocols_share_one_video_and_label_file(tmp_path):
     with results[0].label_path.open(encoding="utf-8", newline="") as file:
         rows = list(csv.DictReader(file))
     assert {row["split"] for row in rows} == {"train", "validation"}
+
+
+def test_label_writer_rejects_invalid_or_decreasing_display_timestamps(tmp_path):
+    config = load_capture_config(Path("configs/capture.yaml"))
+    paths = create_participant_paths(tmp_path, "p00")
+    state = build_protocol_plans(config.protocols)[0].state_at(0)
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    webcam = FramePacket(0, 0.0, 200, frame)
+    phonecam = FramePacket(0, 0.0, 205, frame)
+    writer = PairedLabelWriter(paths.labels_directory / "contract.csv")
+    try:
+        with pytest.raises(ValueError, match="positive Unix nanosecond"):
+            writer.write(paths, 0, 0, webcam, phonecam, state, config.display)
+        writer.write(paths, 0, 100, webcam, phonecam, state, config.display)
+        with pytest.raises(ValueError, match="non-decreasing"):
+            writer.write(paths, 1, 99, webcam, phonecam, state, config.display)
+    finally:
+        writer.close()
 
 
 def test_coordinate_conventions():

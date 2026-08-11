@@ -89,7 +89,7 @@ protocols:
     movement_duration_ms: 5000
     transition_duration_ms: 1000
     edge_exclusion_ms: 400
-    # 레이턴시 측정 후 이 값만 바꾸면 동적 label에 target(t-lag)가 적용됩니다.
+    # 원본 labels에는 레이턴시를 적용하지 않습니다. 후속 동기화 단계용 예약 값입니다.
     latency_ms: 0
     show_guide_line: true
 
