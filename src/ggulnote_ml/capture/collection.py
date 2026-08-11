@@ -14,7 +14,14 @@ from .camera import CameraSource
 from .config import CaptureConfig, DisplayConfig
 from .contracts import FramePacket
 from .dataset import ParticipantPaths
-from .protocols import ProtocolFrameState, ProtocolPlan, normalized_coordinates, write_protocol_events
+from .frame_samples import FrameSampleWriter
+from .protocols import (
+    ProtocolFrameState,
+    ProtocolPlan,
+    ProtocolRunner,
+    normalized_coordinates,
+    write_protocol_events,
+)
 from .recorder import SessionRecorder
 
 
@@ -22,13 +29,12 @@ LABEL_COLUMNS = (
     "participant",
     "protocol",
     "split",
-    "frame",
+    "pair",
     "display_timestamp",
     "webcam_frame",
     "webcam_timestamp",
     "phonecam_frame",
     "phonecam_timestamp",
-    "time_diff_ms",
     "x_px",
     "y_px",
     "x_norm",
@@ -36,12 +42,11 @@ LABEL_COLUMNS = (
     "x_centered",
     "y_centered",
     "segment",
-    "repeat",
     "target",
     "direction",
-    "settling",
+    "confirmation_timestamp",
+    "confirmation_offset_ms",
     "usable",
-    "training",
 )
 
 
@@ -97,14 +102,12 @@ class PairedLabelWriter:
                 "participant": paths.participant_id,
                 "protocol": state.protocol_id,
                 "split": state.split,
-                "frame": pair_index,
+                "pair": pair_index,
                 "display_timestamp": display_timestamp_ns,
                 "webcam_frame": webcam.frame_index,
                 "webcam_timestamp": webcam.unix_timestamp_ns,
                 "phonecam_frame": iphone.frame_index,
                 "phonecam_timestamp": iphone.unix_timestamp_ns,
-                "time_diff_ms": "%.6f"
-                % ((iphone.unix_timestamp_ns - webcam.unix_timestamp_ns) / 1_000_000.0),
                 "x_px": x_px,
                 "y_px": y_px,
                 "x_norm": x_norm,
@@ -112,12 +115,19 @@ class PairedLabelWriter:
                 "x_centered": centered_x,
                 "y_centered": centered_y,
                 "segment": state.segment_index if state.segment_index is not None else "",
-                "repeat": state.repeat_index if state.repeat_index is not None else "",
                 "target": state.target_index if state.target_index is not None else "",
                 "direction": state.direction,
-                "settling": int(state.is_settling),
+                "confirmation_timestamp": (
+                    state.confirmation_timestamp_ns
+                    if state.confirmation_timestamp_ns is not None
+                    else ""
+                ),
+                "confirmation_offset_ms": (
+                    "%.3f" % state.confirmation_offset_ms
+                    if state.confirmation_offset_ms is not None
+                    else ""
+                ),
                 "usable": int(state.is_usable_window),
-                "training": int(state.is_training_sample),
             }
         )
 
@@ -141,10 +151,46 @@ def render_protocol(display: DisplayConfig, plan: ProtocolPlan, state: ProtocolF
             y0 = round(0.1 * (display.canvas_height - 1))
             y1 = round(0.9 * (display.canvas_height - 1))
             cv2.line(canvas, (x, y0), (x, y1), display.guide_bgr, 1, cv2.LINE_AA)
+        if state.confirmation_required:
+            if state.is_confirmed:
+                ring_radius = display.point_radius_px + 5
+                ring_color = display.confirmed_ring_bgr
+            else:
+                ring_radius = round(
+                    display.point_radius_px
+                    + (display.confirmation_ring_radius_px - display.point_radius_px)
+                    * (1.0 - state.fixation_progress)
+                )
+                ring_color = display.confirmation_ring_bgr
+            cv2.circle(canvas, (x, y), ring_radius, ring_color, 2, cv2.LINE_AA)
         cv2.circle(canvas, (x, y), display.point_radius_px, display.point_bgr, -1, cv2.LINE_AA)
+        if state.confirmation_required:
+            if state.is_confirmed:
+                instruction = "Keep looking..."
+            elif state.fixation_progress < 1.0:
+                instruction = "Hold your gaze on the dot..."
+            else:
+                instruction = "Click or press Space"
+            _center_text(canvas, instruction, display.canvas_height - 36, 0.65)
     elif state.phase == "complete_message":
         _center_text(canvas, "%s complete" % plan.protocol_id, display.canvas_height // 2, 1.0)
     return canvas
+
+
+class _ConfirmationInput:
+    """Collect a mouse click without coupling OpenCV callbacks to protocol state."""
+
+    def __init__(self) -> None:
+        self._mouse_requested = False
+
+    def on_mouse(self, event, _x, _y, _flags, _parameter) -> None:
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self._mouse_requested = True
+
+    def consume(self, key: int) -> bool:
+        requested = self._mouse_requested or key in {ord(" "), 13}
+        self._mouse_requested = False
+        return requested
 
 
 def _center_text(canvas: np.ndarray, text: str, y: int, scale: float) -> None:
@@ -280,8 +326,11 @@ def _run_real_protocols_inner(
         )
         label_path = paths.labels_directory / "labels.csv"
         labels = PairedLabelWriter(label_path)
+        frame_samples = FrameSampleWriter(paths, config.frame_capture, config.display)
         pair_index = 0
         cv2.namedWindow(config.display.window_name, cv2.WINDOW_NORMAL)
+        confirmation_input = _ConfirmationInput()
+        cv2.setMouseCallback(config.display.window_name, confirmation_input.on_mouse)
         if config.display.fullscreen:
             cv2.setWindowProperty(
                 config.display.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN
@@ -290,12 +339,13 @@ def _run_real_protocols_inner(
         try:
             for plan in plans:
                 write_protocol_events(paths.events_directory / (plan.protocol_id + ".csv"), plan)
+                runner = ProtocolRunner(plan)
                 protocol_started_ns = time.monotonic_ns()
                 protocol_pairs = 0
                 status = "completed"
                 while True:
                     elapsed_ms = (time.monotonic_ns() - protocol_started_ns) / 1_000_000.0
-                    display_state = plan.state_at(elapsed_ms)
+                    display_state = runner.state_at(elapsed_ms)
                     if display_state.phase == "finished":
                         break
                     cv2.imshow(
@@ -307,9 +357,19 @@ def _run_real_protocols_inner(
                     if key in {ord("q"), 27}:
                         status = "aborted"
                         break
+                    if confirmation_input.consume(key):
+                        runner.confirm(elapsed_ms, display_timestamp_ns)
+                        display_state = runner.state_at(elapsed_ms)
 
                     webcam = webcam_source.read(collection_started_ns)
                     iphone = phone_source.read(collection_started_ns)
+                    frame_samples.observe(
+                        pair_index,
+                        display_timestamp_ns,
+                        webcam,
+                        iphone,
+                        display_state,
+                    )
                     labels.write(
                         paths,
                         pair_index,
@@ -326,10 +386,12 @@ def _run_real_protocols_inner(
                     pair_index += 1
                     protocol_pairs += 1
                 results.append(ProtocolResult(plan.protocol_id, status, protocol_pairs, label_path))
+                frame_samples.flush()
                 if status == "aborted":
                     break
         finally:
             labels.close()
+            frame_samples.close()
             if webcam_recorder:
                 webcam_recorder.close()
             if phone_recorder:
@@ -379,18 +441,28 @@ def run_simulation_protocols(
     webcam_recorder, phone_recorder = _collection_recorders(config, paths, simulation.fps)
     label_path = paths.labels_directory / "labels.csv"
     labels = PairedLabelWriter(label_path)
+    frame_samples = FrameSampleWriter(paths, config.frame_capture, config.display)
     try:
         for plan in plans:
             write_protocol_events(paths.events_directory / (plan.protocol_id + ".csv"), plan)
+            runner = ProtocolRunner(plan)
             protocol_pairs = 0
             while True:
                 elapsed_ms = protocol_pairs * interval_ms
-                display_state = plan.state_at(elapsed_ms)
+                display_state = runner.state_at(elapsed_ms)
                 if display_state.phase == "finished":
                     break
                 display_timestamp_ns = (
                     simulation.base_unix_timestamp_ns + pair_index * interval_ns
                 )
+                if (
+                    display_state.confirmation_required
+                    and not display_state.is_confirmed
+                    and display_state.target_elapsed_ms is not None
+                    and display_state.target_elapsed_ms >= plan.simulation_confirm_after_ms
+                ):
+                    runner.confirm(elapsed_ms, display_timestamp_ns)
+                    display_state = runner.state_at(elapsed_ms)
                 webcam = FramePacket(
                     pair_index,
                     pair_index * interval_ms,
@@ -402,6 +474,13 @@ def run_simulation_protocols(
                     pair_index * interval_ms + simulation.phone_delay_ms,
                     simulation.base_unix_timestamp_ns + pair_index * interval_ns + phone_delay_ns,
                     _simulation_frame(simulation.width, simulation.height, "iphone_left", pair_index),
+                )
+                frame_samples.observe(
+                    pair_index,
+                    display_timestamp_ns,
+                    webcam,
+                    iphone,
+                    display_state,
                 )
                 labels.write(
                     paths,
@@ -419,8 +498,10 @@ def run_simulation_protocols(
                 pair_index += 1
                 protocol_pairs += 1
             results.append(ProtocolResult(plan.protocol_id, "completed", protocol_pairs, label_path))
+            frame_samples.flush()
     finally:
         labels.close()
+        frame_samples.close()
         if webcam_recorder:
             webcam_recorder.close()
         if phone_recorder:

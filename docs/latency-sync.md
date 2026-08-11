@@ -126,7 +126,7 @@ python -m ggulnote_ml.synchronization \
 3. 보정 timestamp가 가장 가까운 프레임을 시간순·일대일로 선택합니다.
 4. `max_pair_diff_ms`를 넘는 쌍은 `valid_sync=0`으로 표시합니다.
 5. 보정 시각에 해당하는 화면 target을 찾습니다.
-6. 같은 동적 segment의 두 target 사이면 좌표를 선형 보간합니다.
+6. 과거 `dynamic_*` 데이터가 입력될 때만 같은 segment의 target을 선형 보간합니다. 현재 `vertical_click_3col_6row`는 정적 클릭 좌표이므로 보간하지 않습니다.
 7. 원본을 건드리지 않고 새 CSV와 요약 JSON을 저장합니다.
 
 ```text
@@ -157,4 +157,4 @@ invalid_reason
 
 1. 실제 dot test 데이터로 보정 프레임 쌍 검증
 2. 동기화 CSV와 MediaPipe 특징 CSV 결합
-3. 동적 y 구간 균등 샘플링
+3. 무작위 정적 학습점과 세로 왕복 클릭점의 균형 샘플링

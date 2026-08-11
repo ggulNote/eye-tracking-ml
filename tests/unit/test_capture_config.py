@@ -16,12 +16,20 @@ def test_capture_config_loads_required_camera_roles_and_protocols():
     assert config.protocols.train_static.columns == 3
     assert config.protocols.train_static.rows == 9
     assert config.protocols.train_static.repeats == 1
+    assert config.protocols.train_static.confirmation_required
+    assert config.protocols.train_static.minimum_fixation_ms == 400
+    assert config.protocols.train_static.capture_duration_ms == 650
     assert config.protocols.evaluation_static.columns == 3
     assert config.protocols.evaluation_static.rows == 6
     assert len(config.protocols.evaluation_static.y_positions) == 6
-    assert len(config.protocols.dynamic.columns) == 3
-    assert config.protocols.dynamic.movement_duration_ms == 5000
-    assert config.protocols.dynamic.edge_exclusion_ms == 400
+    assert len(config.protocols.vertical_click.columns) == 3
+    assert config.protocols.vertical_click.rows == 6
+    assert config.protocols.vertical_click.confirmation_required
+    assert config.frame_capture.enabled
+    assert config.frame_capture.image_format == "jpg"
+    assert config.frame_capture.jpeg_quality == 95
+    assert config.frame_capture.samples_per_target == 1
+    assert config.frame_capture.eye_open_weight > config.frame_capture.face_weight
 
 
 def test_capture_config_rejects_duplicate_device_indices(tmp_path):

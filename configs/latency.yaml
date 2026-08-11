@@ -26,6 +26,7 @@ matching:
   max_pair_diff_ms: 40
   max_target_gap_ms: 150
   enforce_one_to_one: true
+  # 과거 dynamic_* 촬영본 호환용입니다. 현재 vertical_click_*에는 적용되지 않습니다.
   interpolate_dynamic_targets: true
 
 simulation:

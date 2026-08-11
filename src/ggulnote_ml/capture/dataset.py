@@ -20,6 +20,9 @@ class ParticipantPaths:
     calibration_directory: Path
     webcam_directory: Path
     phone_directory: Path
+    images_directory: Path
+    webcam_images_directory: Path
+    phone_images_directory: Path
     labels_directory: Path
     events_directory: Path
     participant_json: Path
@@ -66,6 +69,7 @@ def create_participant_paths(dataset_root: Path, participant_id: str) -> Partici
     output_markers = (
         participant_directory / "webcam",
         participant_directory / "phonecam",
+        participant_directory / "images",
         participant_directory / "labels",
         participant_directory / "events",
         participant_directory / "participant.json",
@@ -82,6 +86,9 @@ def create_participant_paths(dataset_root: Path, participant_id: str) -> Partici
         calibration_directory=participant_directory / "Calibration",
         webcam_directory=participant_directory / "webcam",
         phone_directory=participant_directory / "phonecam",
+        images_directory=participant_directory / "images",
+        webcam_images_directory=participant_directory / "images" / "webcam",
+        phone_images_directory=participant_directory / "images" / "phonecam",
         labels_directory=participant_directory / "labels",
         events_directory=participant_directory / "events",
         participant_json=participant_directory / "participant.json",
@@ -91,6 +98,8 @@ def create_participant_paths(dataset_root: Path, participant_id: str) -> Partici
         paths.calibration_directory / "phonecam",
         paths.webcam_directory,
         paths.phone_directory,
+        paths.webcam_images_directory,
+        paths.phone_images_directory,
         paths.labels_directory,
         paths.events_directory,
     ):

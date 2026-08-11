@@ -15,7 +15,6 @@ REQUIRED_LABEL_COLUMNS = {
     "participant",
     "protocol",
     "split",
-    "frame",
     "display_timestamp",
     "webcam_frame",
     "webcam_timestamp",
@@ -26,12 +25,9 @@ REQUIRED_LABEL_COLUMNS = {
     "x_centered",
     "y_centered",
     "segment",
-    "repeat",
     "target",
     "direction",
-    "settling",
     "usable",
-    "training",
 }
 
 SYNC_COLUMNS = (
@@ -55,12 +51,9 @@ SYNC_COLUMNS = (
     "protocol",
     "split",
     "segment",
-    "repeat",
     "target",
     "direction",
-    "settling",
     "usable",
-    "training",
     "target_interpolated",
     "valid_sync",
     "valid_target",
@@ -78,7 +71,7 @@ class CameraFrameTime:
 
 @dataclass(frozen=True)
 class TargetSample:
-    source_frame: int
+    source_pair: int
     display_timestamp_ns: int
     x_norm: Optional[float]
     y_norm: Optional[float]
@@ -87,12 +80,9 @@ class TargetSample:
     protocol: str
     split: str
     segment: str
-    repeat: str
     target: str
     direction: str
-    settling: int
     usable: int
-    training: int
 
 
 @dataclass(frozen=True)
@@ -140,9 +130,13 @@ def load_raw_labels(
     participant = None
     with path.open(encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
-        missing = REQUIRED_LABEL_COLUMNS - set(reader.fieldnames or ())
+        fieldnames = set(reader.fieldnames or ())
+        missing = REQUIRED_LABEL_COLUMNS - fieldnames
         if missing:
             raise ValueError("Raw labels CSV is missing columns: %s" % ", ".join(sorted(missing)))
+        pair_column = "pair" if "pair" in fieldnames else "frame" if "frame" in fieldnames else None
+        if pair_column is None:
+            raise ValueError("Raw labels CSV must contain pair (or legacy frame).")
         for row_number, row in enumerate(reader, start=2):
             row_participant = row["participant"].strip()
             if not row_participant:
@@ -170,7 +164,7 @@ def load_raw_labels(
             )
             targets.append(
                 TargetSample(
-                    source_frame=_required_int(row, "frame", row_number),
+                    source_pair=_required_int(row, pair_column, row_number),
                     display_timestamp_ns=display_timestamp,
                     x_norm=_optional_float(row["x_norm"], "x_norm", row_number),
                     y_norm=_optional_float(row["y_norm"], "y_norm", row_number),
@@ -179,12 +173,9 @@ def load_raw_labels(
                     protocol=row["protocol"],
                     split=row["split"],
                     segment=row["segment"],
-                    repeat=row["repeat"],
                     target=row["target"],
                     direction=row["direction"],
-                    settling=_required_int(row, "settling", row_number),
                     usable=_required_int(row, "usable", row_number),
-                    training=_required_int(row, "training", row_number),
                 )
             )
     if participant is None:
@@ -393,12 +384,9 @@ def synchronize_labels(
                     "protocol": sample.protocol if sample else "",
                     "split": sample.split if sample else "",
                     "segment": sample.segment if sample else "",
-                    "repeat": sample.repeat if sample else "",
                     "target": sample.target if sample else "",
                     "direction": sample.direction if sample else "",
-                    "settling": sample.settling if sample else 0,
                     "usable": sample.usable if sample else 0,
-                    "training": sample.training if sample else 0,
                     "target_interpolated": int(target.interpolated),
                     "valid_sync": int(valid_sync),
                     "valid_target": int(target.valid),

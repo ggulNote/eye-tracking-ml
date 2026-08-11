@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import pytest
 
-from ggulnote_ml.capture.collection import PairedLabelWriter, run_simulation_protocols
+from ggulnote_ml.capture.collection import LABEL_COLUMNS, PairedLabelWriter, run_simulation_protocols
 from ggulnote_ml.capture.camera import FrozenFrameGuard
 from ggulnote_ml.capture.config import load_capture_config
 from ggulnote_ml.capture.contracts import FramePacket
@@ -16,8 +16,10 @@ from ggulnote_ml.capture.dataset import (
     normalize_participant_id,
     suggest_next_participant_id,
 )
+from ggulnote_ml.capture.frame_samples import IMAGE_SAMPLE_COLUMNS, FrameQualityScorer
 from ggulnote_ml.capture.protocols import (
     ProtocolPlan,
+    ProtocolRunner,
     ProtocolSegment,
     build_protocol_plans,
     normalized_coordinates,
@@ -27,28 +29,27 @@ from ggulnote_ml.capture.recorder import SessionRecorder
 
 def test_protocol_counts_randomization_and_splits():
     config = load_capture_config(Path("configs/capture.yaml"))
-    intro, train, transition, dynamic, refix, evaluation = build_protocol_plans(config.protocols)
+    intro, train, transition, vertical, refix, evaluation = build_protocol_plans(config.protocols)
 
     assert intro.active_duration_ms == 5000
     assert len(train.segments) == 27
     assert transition.active_duration_ms == 3000
-    assert len(dynamic.segments) == 12
-    assert dynamic.active_duration_ms == 36000
+    assert len(vertical.segments) == 36
+    assert vertical.active_duration_ms == 50400
     assert refix.active_duration_ms == 4000
     assert len(evaluation.segments) == 18
     assert train.split == "train"
     assert evaluation.split == "evaluation"
-    assert dynamic.split == "train"
-    assert [segment.direction for segment in dynamic.segments[::2]] == [
-        "top_to_bottom",
-        "bottom_to_top",
-        "top_to_bottom",
-        "bottom_to_top",
-        "top_to_bottom",
-        "bottom_to_top",
-    ]
+    assert vertical.split == "train"
+    assert [segment.direction for segment in vertical.segments[:6]] == [
+        "top_to_bottom"
+    ] * 6
+    assert [segment.direction for segment in vertical.segments[6:12]] == [
+        "bottom_to_top"
+    ] * 6
     assert [segment.target_index for segment in train.segments] != list(range(27))
-    assert sum(plan.total_duration_ms for plan in (intro, train, transition, dynamic, refix, evaluation)) == 105000
+    # Simulation confirms each static point after 0.6s. Real duration is participant-controlled.
+    assert sum(plan.total_duration_ms for plan in (intro, train, transition, vertical, refix, evaluation)) == 128400
     assert config.preview.preflight_duration_ms == 5000
     assert config.preview.camera_width_px == 640
 
@@ -56,29 +57,38 @@ def test_protocol_counts_randomization_and_splits():
 def test_static_training_windows_match_protocol_contract():
     config = load_capture_config(Path("configs/capture.yaml"))
     train = build_protocol_plans(config.protocols)[1]
-    start = train.initial_delay_ms
+    runner = ProtocolRunner(train)
 
-    assert train.state_at(start + 100).is_settling
-    assert not train.state_at(start + 399).is_training_sample
-    assert train.state_at(start + 400).is_training_sample
-    assert train.state_at(start + 1049).is_training_sample
-    assert not train.state_at(start + 1050).is_training_sample
+    assert runner.state_at(100).is_settling
+    assert not runner.confirm(399, 1_700_000_000_000_000_000)
+    assert not runner.state_at(399).is_training_sample
+    assert runner.confirm(400, 1_700_000_000_400_000_000)
+    assert runner.state_at(400).is_training_sample
+    assert runner.state_at(1049).is_training_sample
+    assert not runner.state_at(1050).is_training_sample
+    next_target = runner.state_at(1200)
+    assert next_target.segment_index == 1
+    assert not next_target.is_confirmed
 
 
-def test_dynamic_target_interpolates_without_static_guide_requirement():
+def test_vertical_click_targets_traverse_each_column_down_and_up():
     config = load_capture_config(Path("configs/capture.yaml"))
-    dynamic = build_protocol_plans(config.protocols)[3]
-    halfway = dynamic.initial_delay_ms + dynamic.segments[0].duration_ms / 2
-    state = dynamic.state_at(halfway)
+    vertical = build_protocol_plans(config.protocols)[3]
+    expected_y = np.linspace(
+        config.protocols.vertical_click.y_min,
+        config.protocols.vertical_click.y_max,
+        6,
+    )
 
-    assert state.split == "train"
-    assert state.target_x == pytest.approx(config.protocols.dynamic.columns[0])
-    assert state.target_y == pytest.approx(0.5)
-    assert state.show_guide_line
-    assert state.is_training_sample
-    transition_state = dynamic.state_at(dynamic.segments[0].duration_ms + 100)
-    assert transition_state.direction == "transition"
-    assert not transition_state.is_usable_window
+    for column_index, x in enumerate(config.protocols.vertical_click.columns):
+        column_segments = vertical.segments[column_index * 12 : (column_index + 1) * 12]
+        assert [segment.start_x for segment in column_segments] == pytest.approx([x] * 12)
+        assert [segment.start_y for segment in column_segments[:6]] == pytest.approx(expected_y)
+        assert [segment.start_y for segment in column_segments[6:]] == pytest.approx(
+            expected_y[::-1]
+        )
+    assert vertical.confirmation_required
+    assert not vertical.show_guide_line
 
 
 def test_participant_suggestion_and_participant_no_overwrite(tmp_path):
@@ -90,6 +100,8 @@ def test_participant_suggestion_and_participant_no_overwrite(tmp_path):
     paths = create_participant_paths(tmp_path, "p03")
     assert paths.webcam_directory.name == "webcam"
     assert paths.phone_directory.name == "phonecam"
+    assert paths.webcam_images_directory == paths.images_directory / "webcam"
+    assert paths.phone_images_directory == paths.images_directory / "phonecam"
     with pytest.raises(FileExistsError):
         create_participant_paths(tmp_path, "p03")
 
@@ -121,6 +133,7 @@ def test_simulation_writes_videos_pair_labels_and_unix_timestamps(tmp_path):
     with result.label_path.open(encoding="utf-8", newline="") as file:
         rows = list(csv.DictReader(file))
     assert rows
+    assert tuple(rows[0]) == LABEL_COLUMNS
     assert rows[0]["participant"] == "p00"
     display_timestamps = [int(row["display_timestamp"]) for row in rows]
     assert display_timestamps[0] == config.simulation.base_unix_timestamp_ns
@@ -129,7 +142,8 @@ def test_simulation_writes_videos_pair_labels_and_unix_timestamps(tmp_path):
         int(row["webcam_timestamp"]) >= int(row["display_timestamp"]) for row in rows
     )
     assert int(rows[0]["webcam_timestamp"]) > 0
-    assert float(rows[0]["time_diff_ms"]) == pytest.approx(5.0)
+    assert "time_diff_ms" not in rows[0]
+    assert rows[0]["pair"] == "0"
     assert "latency_ms" not in rows[0]
     assert set(row["split"] for row in rows) == {"train"}
 
@@ -158,6 +172,82 @@ def test_multiple_protocols_share_one_video_and_label_file(tmp_path):
     with results[0].label_path.open(encoding="utf-8", newline="") as file:
         rows = list(csv.DictReader(file))
     assert {row["split"] for row in rows} == {"train", "validation"}
+
+
+def test_confirmed_static_simulation_writes_paired_images_and_manifest(tmp_path):
+    config = load_capture_config(Path("configs/capture.yaml"))
+    config = replace(
+        config,
+        recording=replace(config.recording, enabled=False),
+        simulation=replace(config.simulation, fps=10, width=64, height=48),
+    )
+    paths = create_participant_paths(tmp_path, "p00")
+    plan = ProtocolPlan(
+        protocol_id="click_static",
+        split="train",
+        initial_delay_ms=0,
+        completion_duration_ms=0,
+        segments=(ProtocolSegment(0, 0, 0, 0.5, 0.5, 0.5, 0.5, 1400, "static"),),
+        settling_duration_ms=400,
+        usable_duration_ms=650,
+        show_guide_line=False,
+        confirmation_required=True,
+        confirmation_transition_ms=150,
+        simulation_confirm_after_ms=600,
+    )
+
+    result = run_simulation_protocols(config, paths, (plan,))[0]
+
+    assert result.status == "completed"
+    with (paths.labels_directory / "image_samples.csv").open(
+        encoding="utf-8", newline=""
+    ) as file:
+        samples = list(csv.DictReader(file))
+    assert len(samples) == 1
+    assert tuple(samples[0]) == IMAGE_SAMPLE_COLUMNS
+    assert samples[0]["sample"] == "s000000"
+    assert samples[0]["candidate_count"] == "7"
+    assert all(row["protocol"] == "click_static" for row in samples)
+    assert all(row["split"] == "train" for row in samples)
+    assert len(list(paths.webcam_images_directory.glob("*.jpg"))) == 1
+    assert len(list(paths.phone_images_directory.glob("*.jpg"))) == 1
+
+    with result.label_path.open(encoding="utf-8", newline="") as file:
+        labels = list(csv.DictReader(file))
+    selected_label = next(
+        row for row in labels if row["pair"] == samples[0]["pair"]
+    )
+    assert selected_label["usable"] == "1"
+    assert selected_label["confirmation_timestamp"]
+    with (paths.events_directory / "click_static.csv").open(
+        encoding="utf-8", newline=""
+    ) as file:
+        event_rows = list(csv.DictReader(file))
+    assert tuple(event_rows[0]) == (
+        "protocol",
+        "split",
+        "segment",
+        "repeat",
+        "target",
+        "x",
+        "y",
+        "direction",
+        "confirmation_required",
+    )
+
+
+def test_quality_scorer_prefers_sharp_well_exposed_frame():
+    config = load_capture_config(Path("configs/capture.yaml"))
+    scorer = FrameQualityScorer(config.frame_capture)
+    flat = np.full((160, 240, 3), 128, dtype=np.uint8)
+    checker = np.indices((160, 240)).sum(axis=0) % 2
+    sharp = np.repeat((checker * 255).astype(np.uint8)[:, :, None], 3, axis=2)
+
+    flat_quality = scorer.score(flat)
+    sharp_quality = scorer.score(sharp)
+
+    assert sharp_quality.sharpness > flat_quality.sharpness
+    assert sharp_quality.score > flat_quality.score
 
 
 def test_label_writer_rejects_invalid_or_decreasing_display_timestamps(tmp_path):

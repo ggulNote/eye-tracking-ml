@@ -32,7 +32,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--protocol",
         action="append",
         default=[],
-        help="Protocol id to run; repeat it or use all (default: full 105-second dot test)",
+        help="Protocol id to run; repeat it or use all (default: full participant-confirmed dot test)",
     )
     parser.add_argument("--simulate", action="store_true", help="Create videos and CSVs without cameras")
     parser.add_argument("--participant-metadata", type=Path, help="Optional participant metadata JSON")
@@ -97,7 +97,8 @@ def run_collection(args: argparse.Namespace) -> Path:
 
     started_at = datetime.now(timezone.utc).isoformat()
     metadata = {
-        "schema_version": 2,
+        "schema_version": 4,
+        "csv_schema_version": 2,
         "participant_id": participant_id,
         "status": "running",
         "mode": "simulation" if args.simulate else "camera",
@@ -123,6 +124,22 @@ def run_collection(args: argparse.Namespace) -> Path:
             "canvas_height_pixel": config.display.canvas_height,
         },
         "protocols": [plan.protocol_id for plan in plans],
+        "click_confirmation": {
+            "input": "left_mouse_or_space",
+            "train_required": config.protocols.train_static.confirmation_required,
+            "vertical_required": config.protocols.vertical_click.confirmation_required,
+            "evaluation_required": config.protocols.evaluation_static.confirmation_required,
+        },
+        "frame_capture": {
+            "enabled": config.frame_capture.enabled,
+            "image_format": config.frame_capture.image_format,
+            "webcam_directory": "images/webcam",
+            "phonecam_directory": "images/phonecam",
+            "manifest": "labels/image_samples.csv",
+            "scope": "one_best_pair_per_confirmed_target",
+            "samples_per_target": config.frame_capture.samples_per_target,
+            "quality_heuristic": "haar_eye_face_laplacian_sharpness_exposure",
+        },
         "participant_metadata": participant_metadata,
         "calibration_assets": calibration,
         "missing_calibration_override": calibration_override,

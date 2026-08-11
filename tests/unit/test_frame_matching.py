@@ -5,14 +5,14 @@ from pathlib import Path
 import pytest
 
 from ggulnote_ml.synchronization.config import load_latency_config
-from ggulnote_ml.synchronization.matching import synchronize_labels
+from ggulnote_ml.synchronization.matching import SYNC_COLUMNS, synchronize_labels
 
 
 LABEL_COLUMNS = (
     "participant",
     "protocol",
     "split",
-    "frame",
+    "pair",
     "display_timestamp",
     "webcam_frame",
     "webcam_timestamp",
@@ -23,12 +23,9 @@ LABEL_COLUMNS = (
     "x_centered",
     "y_centered",
     "segment",
-    "repeat",
     "target",
     "direction",
-    "settling",
     "usable",
-    "training",
 )
 
 
@@ -63,7 +60,7 @@ def _write_dynamic_labels(path: Path) -> None:
                     "participant": "p00",
                     "protocol": "dynamic_vertical_3col",
                     "split": "train",
-                    "frame": frame,
+                    "pair": frame,
                     "display_timestamp": display,
                     "webcam_frame": frame,
                     "webcam_timestamp": scene + 100_000_000,
@@ -74,12 +71,9 @@ def _write_dynamic_labels(path: Path) -> None:
                     "x_centered": "0.000000",
                     "y_centered": "%.6f" % (frame * 0.1 - 0.5),
                     "segment": 0,
-                    "repeat": 0,
                     "target": 0,
                     "direction": "top_to_bottom",
-                    "settling": 0,
                     "usable": 1,
-                    "training": 1,
                 }
             )
 
@@ -101,6 +95,7 @@ def test_synchronization_applies_camera_specific_latency_and_interpolates_dynami
     assert summary["valid_pairs"] == 4
     with output.open(encoding="utf-8", newline="") as file:
         rows = list(csv.DictReader(file))
+    assert tuple(rows[0]) == SYNC_COLUMNS
     assert [row["phonecam_frame"] for row in rows] == ["0", "1", "2", "3"]
     assert {float(row["corrected_time_diff_ms"]) for row in rows} == {0.0}
     assert float(rows[0]["y_norm"]) == pytest.approx(0.05)

@@ -90,7 +90,7 @@ make simulate PARTICIPANT=p00 PROTOCOL=all DATASET_ROOT=/private/tmp/gaze-simula
 make collect PARTICIPANT=p00
 ```
 
-데이터는 `data/raw/participants/p00/` 아래에 생성됩니다. 참가자마다 한 번만 수집하며 정면 카메라는 `webcam/capture.mp4`, 참가자 좌측 30–45° iPhone은 `phonecam/capture.mp4`에 저장합니다. 기본 dot test는 중앙 응시 5초, 정적 학습 3×9, 동적 세로 이동 36초, 중앙 재응시 4초, 정적 평가 3×6을 연속 실행하며 약 105초 걸립니다. 모든 구간은 같은 영상과 `labels/labels.csv`에 기록되고 학습 가능 여부는 `training` 열로 구분합니다.
+데이터는 `data/raw/participants/p00/` 아래에 생성됩니다. 참가자마다 한 번만 수집하며 정면 카메라는 `webcam/capture.mp4`, 참가자 좌측 30–45° iPhone은 `phonecam/capture.mp4`에 저장합니다. 정적 학습 3×9, 세로 왕복 3열×6점, 정적 평가 3×6은 참가자가 점을 제대로 본 뒤 마우스 왼쪽 버튼 또는 Space로 확정합니다. 각 클릭 후 안정 구간에서 눈 검출·얼굴 검출·선명도·노출을 기준으로 가장 좋은 프레임 한 쌍만 `images/webcam`, `images/phonecam`에 같은 sample ID로 저장하고 `labels/image_samples.csv`에서 원본 영상 프레임·좌표와 연결합니다.
 
 macOS는 `avfoundation`, Linux는 `v4l2`, Windows는 `dshow` backend를 사용합니다. iPhone 연속성 카메라는 후면 카메라만 제공합니다.
 
@@ -108,4 +108,5 @@ make check
 - [모델 파이프라인](docs/model-pipeline.md)
 - [WebEyeTrack 입출력 규격](docs/webeyetrack-data-contract.md)
 - [다중 카메라 캡처](docs/multi-camera-capture.md)
+- [CSV 스키마 전체 목록](docs/csv-schemas.md)
 - [협업 규칙](CONTRIBUTING.md)

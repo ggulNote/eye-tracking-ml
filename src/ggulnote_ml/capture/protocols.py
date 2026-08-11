@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
-from .config import DynamicProtocolConfig, ProtocolsConfig, StaticProtocolConfig
+from .config import ProtocolsConfig, StaticProtocolConfig, VerticalClickProtocolConfig
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,12 @@ class ProtocolFrameState:
     is_training_sample: bool
     show_guide_line: bool
     label_latency_ms: float
+    confirmation_required: bool = False
+    is_confirmed: bool = False
+    confirmation_timestamp_ns: Optional[int] = None
+    confirmation_offset_ms: Optional[float] = None
+    target_elapsed_ms: Optional[float] = None
+    fixation_progress: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -54,6 +60,9 @@ class ProtocolPlan:
     usable_duration_ms: float
     show_guide_line: bool
     latency_ms: float = 0.0
+    confirmation_required: bool = False
+    confirmation_transition_ms: float = 0.0
+    simulation_confirm_after_ms: float = 0.0
 
     @property
     def active_duration_ms(self) -> float:
@@ -129,6 +138,120 @@ class ProtocolPlan:
         )
 
 
+class ProtocolRunner:
+    """Evaluate one protocol, including participant-confirmed static targets.
+
+    Timed center plans delegate to :meth:`ProtocolPlan.state_at`.
+    Interactive static plans advance only after a valid click/Space confirmation,
+    a post-confirmation capture interval, and a short transition. This keeps the
+    reusable protocol description separate from GUI input handling.
+    """
+
+    def __init__(self, plan: ProtocolPlan) -> None:
+        self.plan = plan
+        self._segment_index = 0
+        self._segment_started_ms = plan.initial_delay_ms
+        self._confirmed_at_ms: Optional[float] = None
+        self._confirmation_timestamp_ns: Optional[int] = None
+        self._completion_started_ms: Optional[float] = None
+
+    def confirm(self, elapsed_ms: float, unix_timestamp_ns: int) -> bool:
+        """Confirm the visible target; return False for early or irrelevant input."""
+
+        if unix_timestamp_ns <= 0:
+            raise ValueError("Confirmation timestamp must be positive Unix nanoseconds.")
+        state = self.state_at(elapsed_ms)
+        if (
+            not self.plan.confirmation_required
+            or state.phase != "target"
+            or state.is_confirmed
+            or state.target_elapsed_ms is None
+            or state.target_elapsed_ms < self.plan.settling_duration_ms
+        ):
+            return False
+        self._confirmed_at_ms = elapsed_ms
+        self._confirmation_timestamp_ns = unix_timestamp_ns
+        return True
+
+    def state_at(self, elapsed_ms: float) -> ProtocolFrameState:
+        if not self.plan.confirmation_required:
+            return self.plan.state_at(elapsed_ms)
+        if elapsed_ms < 0:
+            raise ValueError("Protocol elapsed time must be non-negative.")
+        if elapsed_ms < self.plan.initial_delay_ms:
+            return self.plan._empty_state("ready")
+
+        self._advance_completed_segments(elapsed_ms)
+        if self._segment_index >= len(self.plan.segments):
+            if self._completion_started_ms is None:
+                self._completion_started_ms = elapsed_ms
+            if elapsed_ms - self._completion_started_ms < self.plan.completion_duration_ms:
+                return self.plan._empty_state("complete_message")
+            return self.plan._empty_state("finished")
+
+        segment = self.plan.segments[self._segment_index]
+        target_elapsed_ms = max(0.0, elapsed_ms - self._segment_started_ms)
+        confirmed = self._confirmed_at_ms is not None
+        confirmation_offset_ms = (
+            self._confirmed_at_ms - self._segment_started_ms if confirmed else None
+        )
+        post_confirmation_ms = (
+            max(0.0, elapsed_ms - self._confirmed_at_ms) if confirmed else None
+        )
+        usable = bool(
+            confirmed
+            and post_confirmation_ms is not None
+            and post_confirmation_ms < self.plan.usable_duration_ms
+        )
+        settling = not confirmed
+        fixation_progress = (
+            1.0
+            if self.plan.settling_duration_ms == 0
+            else min(1.0, target_elapsed_ms / self.plan.settling_duration_ms)
+        )
+        return ProtocolFrameState(
+            protocol_id=self.plan.protocol_id,
+            split=self.plan.split,
+            phase="target",
+            segment_index=segment.segment_index,
+            repeat_index=segment.repeat_index,
+            target_index=segment.target_index,
+            target_x=segment.start_x,
+            target_y=segment.start_y,
+            direction=segment.direction,
+            is_settling=settling,
+            is_usable_window=usable,
+            is_training_sample=(
+                usable and self.plan.split == "train" and segment.training_candidate
+            ),
+            show_guide_line=False,
+            label_latency_ms=self.plan.latency_ms,
+            confirmation_required=True,
+            is_confirmed=confirmed,
+            confirmation_timestamp_ns=self._confirmation_timestamp_ns,
+            confirmation_offset_ms=confirmation_offset_ms,
+            target_elapsed_ms=target_elapsed_ms,
+            fixation_progress=fixation_progress,
+        )
+
+    def _advance_completed_segments(self, elapsed_ms: float) -> None:
+        while self._confirmed_at_ms is not None:
+            segment_end_ms = (
+                self._confirmed_at_ms
+                + self.plan.usable_duration_ms
+                + self.plan.confirmation_transition_ms
+            )
+            if elapsed_ms < segment_end_ms:
+                return
+            self._segment_index += 1
+            self._segment_started_ms = segment_end_ms
+            self._confirmed_at_ms = None
+            self._confirmation_timestamp_ns = None
+            if self._segment_index >= len(self.plan.segments):
+                self._completion_started_ms = segment_end_ms
+                return
+
+
 def _linspace(start: float, stop: float, count: int) -> List[float]:
     if count == 1:
         return [(start + stop) / 2]
@@ -161,7 +284,11 @@ def build_static_plan(
                     start_y=y,
                     end_x=x,
                     end_y=y,
-                    duration_ms=config.point_duration_ms,
+                    duration_ms=(
+                        config.simulation_confirm_after_ms
+                        + config.capture_duration_ms
+                        + config.transition_duration_ms
+                    ),
                     direction="static",
                 )
             )
@@ -172,70 +299,62 @@ def build_static_plan(
         initial_delay_ms=initial_delay_ms,
         completion_duration_ms=completion_duration_ms,
         segments=tuple(segments),
-        settling_duration_ms=config.settling_duration_ms,
-        usable_duration_ms=config.usable_duration_ms,
+        settling_duration_ms=config.minimum_fixation_ms,
+        usable_duration_ms=config.capture_duration_ms,
         show_guide_line=False,
+        confirmation_required=config.confirmation_required,
+        confirmation_transition_ms=config.transition_duration_ms,
+        simulation_confirm_after_ms=config.simulation_confirm_after_ms,
     )
 
 
-def build_dynamic_plan(
-    config: DynamicProtocolConfig,
+def build_vertical_click_plan(
+    config: VerticalClickProtocolConfig,
     initial_delay_ms: float,
     completion_duration_ms: float,
 ) -> ProtocolPlan:
+    """Build left/center/right click targets, each traversed down and back up."""
+
     segments = []
     segment_index = 0
+    y_positions = _linspace(config.y_min, config.y_max, config.rows)
     for column_index, x in enumerate(config.columns):
-        for direction_index, (start_y, end_y, direction) in enumerate(
-            (
-                (config.y_min, config.y_max, "top_to_bottom"),
-                (config.y_max, config.y_min, "bottom_to_top"),
-            )
-        ):
-            segments.append(
-                ProtocolSegment(
-                    segment_index=segment_index,
-                    repeat_index=0,
-                    target_index=column_index,
-                    start_x=x,
-                    start_y=start_y,
-                    end_x=x,
-                    end_y=end_y,
-                    duration_ms=config.movement_duration_ms,
-                    direction=direction,
-                    usable_start_ms=config.edge_exclusion_ms,
-                    usable_end_ms=config.movement_duration_ms - config.edge_exclusion_ms,
-                    training_candidate=True,
+        traversals = (
+            (0, tuple(enumerate(y_positions)), "top_to_bottom"),
+            (1, tuple(reversed(tuple(enumerate(y_positions)))), "bottom_to_top"),
+        )
+        for repeat_index, indexed_positions, direction in traversals:
+            for row_index, y in indexed_positions:
+                segments.append(
+                    ProtocolSegment(
+                        segment_index=segment_index,
+                        repeat_index=repeat_index,
+                        target_index=column_index * config.rows + row_index,
+                        start_x=x,
+                        start_y=y,
+                        end_x=x,
+                        end_y=y,
+                        duration_ms=(
+                            config.simulation_confirm_after_ms
+                            + config.capture_duration_ms
+                            + config.transition_duration_ms
+                        ),
+                        direction=direction,
+                    )
                 )
-            )
-            segment_index += 1
-            segments.append(
-                ProtocolSegment(
-                    segment_index=segment_index,
-                    repeat_index=0,
-                    target_index=column_index,
-                    start_x=x,
-                    start_y=end_y,
-                    end_x=x,
-                    end_y=end_y,
-                    duration_ms=config.transition_duration_ms,
-                    direction="transition",
-                    usable_start_ms=0.0,
-                    usable_end_ms=0.0,
-                    training_candidate=False,
-                )
-            )
-            segment_index += 1
+                segment_index += 1
     return ProtocolPlan(
         protocol_id=config.protocol_id,
         split=config.split,
         initial_delay_ms=initial_delay_ms,
         completion_duration_ms=completion_duration_ms,
         segments=tuple(segments),
-        settling_duration_ms=0.0,
-        usable_duration_ms=config.movement_duration_ms - config.edge_exclusion_ms * 2,
-        show_guide_line=config.show_guide_line,
-        latency_ms=config.latency_ms,
+        settling_duration_ms=config.minimum_fixation_ms,
+        usable_duration_ms=config.capture_duration_ms,
+        show_guide_line=False,
+        confirmation_required=config.confirmation_required,
+        confirmation_transition_ms=config.transition_duration_ms,
+        simulation_confirm_after_ms=config.simulation_confirm_after_ms,
     )
 
 
@@ -262,14 +381,14 @@ def build_center_plan(protocol_id: str, duration_ms: float) -> ProtocolPlan:
 def build_protocol_plans(config: ProtocolsConfig) -> Tuple[ProtocolPlan, ...]:
     train = build_static_plan(config.train_static, 0, 0)
     transition = build_center_plan("protocol_transition", config.transition_ms)
-    dynamic = build_dynamic_plan(config.dynamic, 0, 0)
+    vertical_click = build_vertical_click_plan(config.vertical_click, 0, 0)
     refix = build_center_plan("center_refix", config.center_refix_ms)
     evaluation = build_static_plan(config.evaluation_static, 0, config.completion_duration_ms)
     return (
         build_center_plan("intro_center", config.intro_center_ms),
         train,
         transition,
-        dynamic,
+        vertical_click,
         refix,
         evaluation,
     )
@@ -303,12 +422,10 @@ def write_protocol_events(path: Path, plan: ProtocolPlan) -> None:
                 "segment",
                 "repeat",
                 "target",
-                "start_x",
-                "start_y",
-                "end_x",
-                "end_y",
-                "duration_ms",
+                "x",
+                "y",
                 "direction",
+                "confirmation_required",
             ]
         )
         for segment in plan.segments:
@@ -321,9 +438,7 @@ def write_protocol_events(path: Path, plan: ProtocolPlan) -> None:
                     segment.target_index,
                     "%.6f" % segment.start_x,
                     "%.6f" % segment.start_y,
-                    "%.6f" % segment.end_x,
-                    "%.6f" % segment.end_y,
-                    "%.3f" % segment.duration_ms,
                     segment.direction,
+                    int(plan.confirmation_required),
                 ]
             )

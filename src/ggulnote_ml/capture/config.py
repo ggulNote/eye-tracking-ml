@@ -40,6 +40,25 @@ class RecordingConfig:
 
 
 @dataclass(frozen=True)
+class FrameCaptureConfig:
+    enabled: bool
+    image_format: str
+    jpeg_quality: int
+    samples_per_target: int
+    scoring_width_px: int
+    ideal_brightness: float
+    sharpness_reference: float
+    eye_open_weight: float
+    face_weight: float
+    sharpness_weight: float
+    brightness_weight: float
+    face_scale_factor: float
+    face_min_neighbors: int
+    eye_scale_factor: float
+    eye_min_neighbors: int
+
+
+@dataclass(frozen=True)
 class DatasetConfig:
     root_directory: Path
     require_calibration_assets: bool
@@ -52,9 +71,12 @@ class DisplayConfig:
     canvas_width: int
     canvas_height: int
     point_radius_px: int
+    confirmation_ring_radius_px: int
     background_bgr: Tuple[int, int, int]
     point_bgr: Tuple[int, int, int]
     guide_bgr: Tuple[int, int, int]
+    confirmation_ring_bgr: Tuple[int, int, int]
+    confirmed_ring_bgr: Tuple[int, int, int]
 
 
 @dataclass(frozen=True)
@@ -68,25 +90,28 @@ class StaticProtocolConfig:
     x_max: float
     y_min: float
     y_max: float
-    point_duration_ms: float
-    settling_duration_ms: float
-    usable_duration_ms: float
+    confirmation_required: bool
+    minimum_fixation_ms: float
+    capture_duration_ms: float
+    transition_duration_ms: float
+    simulation_confirm_after_ms: float
     random_seed: int
     y_positions: Tuple[float, ...]
 
 
 @dataclass(frozen=True)
-class DynamicProtocolConfig:
+class VerticalClickProtocolConfig:
     protocol_id: str
     split: str
     columns: Tuple[float, ...]
+    rows: int
     y_min: float
     y_max: float
-    movement_duration_ms: float
+    confirmation_required: bool
+    minimum_fixation_ms: float
+    capture_duration_ms: float
     transition_duration_ms: float
-    edge_exclusion_ms: float
-    latency_ms: float
-    show_guide_line: bool
+    simulation_confirm_after_ms: float
 
 
 @dataclass(frozen=True)
@@ -97,7 +122,7 @@ class ProtocolsConfig:
     completion_duration_ms: float
     train_static: StaticProtocolConfig
     evaluation_static: StaticProtocolConfig
-    dynamic: DynamicProtocolConfig
+    vertical_click: VerticalClickProtocolConfig
 
 
 @dataclass(frozen=True)
@@ -115,6 +140,7 @@ class CaptureConfig:
     cameras: Tuple[CameraConfig, ...]
     preview: PreviewConfig
     recording: RecordingConfig
+    frame_capture: FrameCaptureConfig
     dataset: DatasetConfig
     display: DisplayConfig
     protocols: ProtocolsConfig
@@ -154,9 +180,13 @@ def _static_config(raw: Dict[str, Any], name: str) -> StaticProtocolConfig:
         x_max=float(_required(raw, "x_max", name)),
         y_min=float(_required(raw, "y_min", name)),
         y_max=float(_required(raw, "y_max", name)),
-        point_duration_ms=float(_required(raw, "point_duration_ms", name)),
-        settling_duration_ms=float(_required(raw, "settling_duration_ms", name)),
-        usable_duration_ms=float(_required(raw, "usable_duration_ms", name)),
+        confirmation_required=bool(_required(raw, "confirmation_required", name)),
+        minimum_fixation_ms=float(_required(raw, "minimum_fixation_ms", name)),
+        capture_duration_ms=float(_required(raw, "capture_duration_ms", name)),
+        transition_duration_ms=float(_required(raw, "transition_duration_ms", name)),
+        simulation_confirm_after_ms=float(
+            _required(raw, "simulation_confirm_after_ms", name)
+        ),
         random_seed=int(_required(raw, "random_seed", name)),
         y_positions=tuple(float(value) for value in raw.get("y_positions", [])),
     )
@@ -164,10 +194,16 @@ def _static_config(raw: Dict[str, Any], name: str) -> StaticProtocolConfig:
         raise ValueError("%s grid dimensions and repeats must be positive." % name)
     if not 0 <= config.x_min < config.x_max <= 1 or not 0 <= config.y_min < config.y_max <= 1:
         raise ValueError("%s coordinate bounds must be ordered within [0, 1]." % name)
-    if config.point_duration_ms <= 0 or config.settling_duration_ms < 0 or config.usable_duration_ms <= 0:
+    if (
+        config.minimum_fixation_ms < 0
+        or config.capture_duration_ms <= 0
+        or config.transition_duration_ms < 0
+    ):
         raise ValueError("%s durations are invalid." % name)
-    if config.settling_duration_ms + config.usable_duration_ms > config.point_duration_ms:
-        raise ValueError("%s settling + usable duration cannot exceed point duration." % name)
+    if not config.minimum_fixation_ms <= config.simulation_confirm_after_ms:
+        raise ValueError(
+            "%s.simulation_confirm_after_ms must be at least minimum_fixation_ms." % name
+        )
     if config.y_positions:
         if len(config.y_positions) != config.rows:
             raise ValueError("%s.y_positions length must equal rows." % name)
@@ -240,11 +276,85 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
     if timing_mode not in {"configured", "measured"}:
         raise ValueError("recording.timing_mode must be configured or measured.")
 
+    frame_capture_raw = _mapping(raw, "frame_capture")
+    image_format = str(
+        _required(frame_capture_raw, "image_format", "frame_capture")
+    ).strip().lower()
+    jpeg_quality = int(_required(frame_capture_raw, "jpeg_quality", "frame_capture"))
+    if image_format not in {"jpg", "png"}:
+        raise ValueError("frame_capture.image_format must be jpg or png.")
+    if not 1 <= jpeg_quality <= 100:
+        raise ValueError("frame_capture.jpeg_quality must be between 1 and 100.")
+    frame_capture = FrameCaptureConfig(
+        enabled=bool(_required(frame_capture_raw, "enabled", "frame_capture")),
+        image_format=image_format,
+        jpeg_quality=jpeg_quality,
+        samples_per_target=int(
+            _required(frame_capture_raw, "samples_per_target", "frame_capture")
+        ),
+        scoring_width_px=int(
+            _required(frame_capture_raw, "scoring_width_px", "frame_capture")
+        ),
+        ideal_brightness=float(
+            _required(frame_capture_raw, "ideal_brightness", "frame_capture")
+        ),
+        sharpness_reference=float(
+            _required(frame_capture_raw, "sharpness_reference", "frame_capture")
+        ),
+        eye_open_weight=float(
+            _required(frame_capture_raw, "eye_open_weight", "frame_capture")
+        ),
+        face_weight=float(_required(frame_capture_raw, "face_weight", "frame_capture")),
+        sharpness_weight=float(
+            _required(frame_capture_raw, "sharpness_weight", "frame_capture")
+        ),
+        brightness_weight=float(
+            _required(frame_capture_raw, "brightness_weight", "frame_capture")
+        ),
+        face_scale_factor=float(
+            _required(frame_capture_raw, "face_scale_factor", "frame_capture")
+        ),
+        face_min_neighbors=int(
+            _required(frame_capture_raw, "face_min_neighbors", "frame_capture")
+        ),
+        eye_scale_factor=float(
+            _required(frame_capture_raw, "eye_scale_factor", "frame_capture")
+        ),
+        eye_min_neighbors=int(
+            _required(frame_capture_raw, "eye_min_neighbors", "frame_capture")
+        ),
+    )
+    if frame_capture.samples_per_target != 1:
+        raise ValueError("frame_capture.samples_per_target must be 1 for best-frame mode.")
+    if frame_capture.scoring_width_px <= 0:
+        raise ValueError("frame_capture.scoring_width_px must be positive.")
+    if not 0 <= frame_capture.ideal_brightness <= 255:
+        raise ValueError("frame_capture.ideal_brightness must be within [0, 255].")
+    if frame_capture.sharpness_reference <= 0:
+        raise ValueError("frame_capture.sharpness_reference must be positive.")
+    if any(
+        weight < 0
+        for weight in (
+            frame_capture.eye_open_weight,
+            frame_capture.face_weight,
+            frame_capture.sharpness_weight,
+            frame_capture.brightness_weight,
+        )
+    ):
+        raise ValueError("frame_capture quality weights must be non-negative.")
+    if frame_capture.face_scale_factor <= 1 or frame_capture.eye_scale_factor <= 1:
+        raise ValueError("frame_capture cascade scale factors must be greater than 1.")
+    if frame_capture.face_min_neighbors <= 0 or frame_capture.eye_min_neighbors <= 0:
+        raise ValueError("frame_capture cascade neighbor counts must be positive.")
+
     display_raw = _mapping(raw, "display")
     canvas_width = int(_required(display_raw, "canvas_width", "display"))
     canvas_height = int(_required(display_raw, "canvas_height", "display"))
     radius = int(_required(display_raw, "point_radius_px", "display"))
-    if canvas_width <= 0 or canvas_height <= 0 or radius <= 0:
+    ring_radius = int(
+        _required(display_raw, "confirmation_ring_radius_px", "display")
+    )
+    if canvas_width <= 0 or canvas_height <= 0 or radius <= 0 or ring_radius < radius:
         raise ValueError("Display canvas dimensions and point radius must be positive.")
 
     protocols_raw = _mapping(raw, "protocols")
@@ -252,36 +362,50 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
     evaluation = _static_config(
         _mapping(protocols_raw, "evaluation_static"), "protocols.evaluation_static"
     )
-    dynamic_raw = _mapping(protocols_raw, "dynamic")
-    columns = tuple(float(value) for value in _required(dynamic_raw, "columns", "protocols.dynamic"))
-    dynamic = DynamicProtocolConfig(
-        protocol_id=str(_required(dynamic_raw, "protocol_id", "protocols.dynamic")),
-        split=str(_required(dynamic_raw, "split", "protocols.dynamic")),
+    vertical_raw = _mapping(protocols_raw, "vertical_click")
+    columns = tuple(
+        float(value)
+        for value in _required(vertical_raw, "columns", "protocols.vertical_click")
+    )
+    vertical_click = VerticalClickProtocolConfig(
+        protocol_id=str(
+            _required(vertical_raw, "protocol_id", "protocols.vertical_click")
+        ),
+        split=str(_required(vertical_raw, "split", "protocols.vertical_click")),
         columns=columns,
-        y_min=float(_required(dynamic_raw, "y_min", "protocols.dynamic")),
-        y_max=float(_required(dynamic_raw, "y_max", "protocols.dynamic")),
-        movement_duration_ms=float(
-            _required(dynamic_raw, "movement_duration_ms", "protocols.dynamic")
+        rows=int(_required(vertical_raw, "rows", "protocols.vertical_click")),
+        y_min=float(_required(vertical_raw, "y_min", "protocols.vertical_click")),
+        y_max=float(_required(vertical_raw, "y_max", "protocols.vertical_click")),
+        confirmation_required=bool(
+            _required(vertical_raw, "confirmation_required", "protocols.vertical_click")
+        ),
+        minimum_fixation_ms=float(
+            _required(vertical_raw, "minimum_fixation_ms", "protocols.vertical_click")
+        ),
+        capture_duration_ms=float(
+            _required(vertical_raw, "capture_duration_ms", "protocols.vertical_click")
         ),
         transition_duration_ms=float(
-            _required(dynamic_raw, "transition_duration_ms", "protocols.dynamic")
+            _required(vertical_raw, "transition_duration_ms", "protocols.vertical_click")
         ),
-        edge_exclusion_ms=float(
-            _required(dynamic_raw, "edge_exclusion_ms", "protocols.dynamic")
+        simulation_confirm_after_ms=float(
+            _required(vertical_raw, "simulation_confirm_after_ms", "protocols.vertical_click")
         ),
-        latency_ms=float(_required(dynamic_raw, "latency_ms", "protocols.dynamic")),
-        show_guide_line=bool(_required(dynamic_raw, "show_guide_line", "protocols.dynamic")),
     )
     if len(columns) != 3 or any(not 0 <= value <= 1 for value in columns):
-        raise ValueError("Dynamic protocol requires three normalized columns.")
-    if not 0 <= dynamic.y_min < dynamic.y_max <= 1 or dynamic.movement_duration_ms <= 0:
-        raise ValueError("Dynamic protocol bounds or duration are invalid.")
-    if dynamic.transition_duration_ms < 0 or dynamic.edge_exclusion_ms < 0:
-        raise ValueError("Dynamic transition and edge exclusion must be non-negative.")
-    if dynamic.edge_exclusion_ms * 2 >= dynamic.movement_duration_ms:
-        raise ValueError("Dynamic edge exclusion must leave a usable movement interval.")
-    if dynamic.latency_ms < 0:
-        raise ValueError("Dynamic latency must be non-negative.")
+        raise ValueError("Vertical click protocol requires three normalized columns.")
+    if vertical_click.rows <= 1:
+        raise ValueError("Vertical click protocol requires at least two rows.")
+    if not 0 <= vertical_click.y_min < vertical_click.y_max <= 1:
+        raise ValueError("Vertical click protocol coordinate bounds are invalid.")
+    if (
+        vertical_click.minimum_fixation_ms < 0
+        or vertical_click.capture_duration_ms <= 0
+        or vertical_click.transition_duration_ms < 0
+        or vertical_click.simulation_confirm_after_ms
+        < vertical_click.minimum_fixation_ms
+    ):
+        raise ValueError("Vertical click protocol durations are invalid.")
 
     simulation_raw = _mapping(raw, "simulation")
     simulation = SimulationConfig(
@@ -310,6 +434,7 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
             video_codec=codec,
             timing_mode=timing_mode,
         ),
+        frame_capture=frame_capture,
         dataset=DatasetConfig(
             root_directory=dataset_root.resolve(),
             require_calibration_assets=bool(
@@ -322,11 +447,20 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
             canvas_width=canvas_width,
             canvas_height=canvas_height,
             point_radius_px=radius,
+            confirmation_ring_radius_px=ring_radius,
             background_bgr=_parse_bgr(
                 _required(display_raw, "background_bgr", "display"), "display.background_bgr"
             ),
             point_bgr=_parse_bgr(_required(display_raw, "point_bgr", "display"), "display.point_bgr"),
             guide_bgr=_parse_bgr(_required(display_raw, "guide_bgr", "display"), "display.guide_bgr"),
+            confirmation_ring_bgr=_parse_bgr(
+                _required(display_raw, "confirmation_ring_bgr", "display"),
+                "display.confirmation_ring_bgr",
+            ),
+            confirmed_ring_bgr=_parse_bgr(
+                _required(display_raw, "confirmed_ring_bgr", "display"),
+                "display.confirmed_ring_bgr",
+            ),
         ),
         protocols=ProtocolsConfig(
             intro_center_ms=float(_required(protocols_raw, "intro_center_ms", "protocols")),
@@ -337,7 +471,7 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
             ),
             train_static=train,
             evaluation_static=evaluation,
-            dynamic=dynamic,
+            vertical_click=vertical_click,
         ),
         simulation=simulation,
     )

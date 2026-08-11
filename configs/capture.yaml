@@ -41,15 +41,38 @@ recording:
   # MP4 시간축만 보정합니다. 프레임 재압축이나 번호 변경은 없습니다.
   timing_mode: measured
 
+# 정적 점을 클릭으로 확정한 뒤 안정 구간의 두 카메라 프레임을
+# 같은 sample id의 이미지로 저장합니다. 원본 MP4도 항상 유지합니다.
+frame_capture:
+  enabled: true
+  image_format: jpg
+  jpeg_quality: 95
+  samples_per_target: 1
+  # 얼굴/눈 검출을 가장 우선하고 선명도와 노출을 보조 기준으로 사용합니다.
+  scoring_width_px: 320
+  ideal_brightness: 128
+  sharpness_reference: 500.0
+  eye_open_weight: 100.0
+  face_weight: 10.0
+  sharpness_weight: 5.0
+  brightness_weight: 2.0
+  face_scale_factor: 1.1
+  face_min_neighbors: 5
+  eye_scale_factor: 1.1
+  eye_min_neighbors: 4
+
 display:
   window_name: Gaze Collection
   fullscreen: true
   canvas_width: 1920
   canvas_height: 1080
   point_radius_px: 12
+  confirmation_ring_radius_px: 36
   background_bgr: [0, 0, 0]
   point_bgr: [255, 255, 255]
   guide_bgr: [48, 48, 48]
+  confirmation_ring_bgr: [128, 128, 128]
+  confirmed_ring_bgr: [0, 200, 0]
 
 protocols:
   intro_center_ms: 5000
@@ -67,9 +90,13 @@ protocols:
     x_max: 0.8
     y_min: 0.08
     y_max: 0.92
-    point_duration_ms: 1200
-    settling_duration_ms: 400
-    usable_duration_ms: 650
+    # 점을 0.4초 이상 본 뒤 참가자가 마우스 왼쪽 버튼 또는 Space로 확정합니다.
+    confirmation_required: true
+    minimum_fixation_ms: 400
+    capture_duration_ms: 650
+    transition_duration_ms: 150
+    # simulation에서는 사람이 클릭할 수 없으므로 이 시점에 자동 확정합니다.
+    simulation_confirm_after_ms: 600
     random_seed: 20260807
 
   evaluation_static:
@@ -83,23 +110,26 @@ protocols:
     y_min: 0.1325
     y_max: 0.8675
     y_positions: [0.1325, 0.2375, 0.4475, 0.5525, 0.7625, 0.8675]
-    point_duration_ms: 1200
-    settling_duration_ms: 400
-    usable_duration_ms: 650
+    confirmation_required: true
+    minimum_fixation_ms: 400
+    capture_duration_ms: 650
+    transition_duration_ms: 150
+    simulation_confirm_after_ms: 600
     random_seed: 20260808
 
-  dynamic:
-    protocol_id: dynamic_vertical_3col
+  vertical_click:
+    protocol_id: vertical_click_3col_6row
     split: train
     columns: [0.2, 0.5, 0.8]
+    rows: 6
     y_min: 0.08
     y_max: 0.92
-    movement_duration_ms: 5000
-    transition_duration_ms: 1000
-    edge_exclusion_ms: 400
-    # 원본 labels에는 레이턴시를 적용하지 않습니다. 후속 동기화 단계용 예약 값입니다.
-    latency_ms: 0
-    show_guide_line: true
+    # 각 열에서 6점을 위→아래로 본 뒤 같은 6점을 아래→위로 다시 봅니다.
+    confirmation_required: true
+    minimum_fixation_ms: 400
+    capture_duration_ms: 650
+    transition_duration_ms: 150
+    simulation_confirm_after_ms: 600
 
 simulation:
   fps: 10
