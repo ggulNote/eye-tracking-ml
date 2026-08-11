@@ -36,7 +36,7 @@ MLflow
 - 학습·검증·테스트 데이터는 `participant_id` 기준으로 분리합니다.
 - 데이터는 Git 저장소 밖의 `GGULNOTE_DATA_ROOT`에 저장합니다.
 - MLflow에는 원본 영상이 아닌 설정, 메트릭, 데이터 버전, 모델만 기록합니다.
-- 현재는 전체 파이프라인 검증용 모델이 연결되어 있으며, MediaPipe와 BlazeGaze는 추후 추가할 예정입니다.
+- `ggulnote-video-preprocess`는 동기화 영상 프레임의 MediaPipe 얼굴·홍채, EAR, 8차원 2D 특징을 생성합니다. WebEyeTrack용 3D head/eye-patch processor와 BlazeGaze 모델은 별도 후속 범위입니다.
 
 ## 모델 입출력
 

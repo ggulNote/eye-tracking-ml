@@ -158,4 +158,4 @@ segment,repeat,target,direction,settling,usable,training
 
 현재 모듈은 지속 학습 파이프라인의 **원본 데이터 수집 단계**입니다. `labels.csv`에는 실제 표시 좌표와 `display_timestamp`를 보정 없이 기록합니다. 실제 lag는 별도 레이턴시 측정 단계에서 계산하고, 보정 결과는 원본을 덮어쓰지 않고 별도의 synchronized CSV로 생성합니다. 세부 계약은 [레이턴시·프레임 동기화 문서](latency-sync.md)를 참고합니다.
 
-이후 MediaPipe 특징 추출, 눈 감김·얼굴 미검출 제거, y축 15~20구간 균등 샘플링, 정적/동적 50:50 배치 구성, 학습 dataset 변환, MLflow 기반 학습·평가·모델 버전 연결을 구현해야 새 참가자 폴더를 추가하는 것만으로 재학습할 수 있습니다. 평가점은 각 점의 안정 구간 예측 중앙값으로 MAE_x, MAE_y, 상·중·하 MAE_y와 predicted-target y 기울기를 계산합니다.
+동기화 프레임의 MediaPipe 얼굴·홍채, 좌우 EAR, 눈 감김·얼굴 미검출 처리와 8차원 2D 특징 CSV는 `ggulnote-video-preprocess`가 생성합니다. 이후 y축 15~20구간 균등 샘플링, 정적/동적 50:50 배치 구성, 학습 dataset 변환, MLflow 기반 학습·평가·모델 버전 연결을 구현해야 새 참가자 폴더를 추가하는 것만으로 재학습할 수 있습니다. 평가점은 각 점의 안정 구간 예측 중앙값으로 MAE_x, MAE_y, 상·중·하 MAE_y와 predicted-target y 기울기를 계산합니다.
