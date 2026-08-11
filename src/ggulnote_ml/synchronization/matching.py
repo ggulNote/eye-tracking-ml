@@ -326,12 +326,17 @@ def synchronize_labels(
     latency_path: Path,
     output_path: Path,
     config: MatchingConfig,
+    *,
+    allow_shared_latency: bool = False,
 ) -> Dict[str, object]:
     webcam_latency_ms, phonecam_latency_ms = load_latency_medians(latency_path)
     participant, webcam, phonecam, targets = load_raw_labels(
         labels_path, webcam_latency_ms, phonecam_latency_ms
     )
-    load_latency_medians(latency_path, participant=participant)
+    load_latency_medians(
+        latency_path,
+        participant=None if allow_shared_latency else participant,
+    )
     if output_path.exists():
         raise FileExistsError("Synchronized CSV already exists and will not be overwritten: %s" % output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -9,7 +9,28 @@ import numpy as np
 
 from ggulnote_ml.exceptions import ContractError
 from ggulnote_ml.synchronization.matching import SYNC_COLUMNS
-from ggulnote_ml.video_preprocessing.contracts import SynchronizedPair
+from ggulnote_ml.video_preprocessing.contracts import (
+    SelectedSample,
+    SelectedSynchronizedPair,
+    SynchronizedPair,
+)
+
+
+SELECTED_SAMPLE_REQUIRED_COLUMNS = frozenset(
+    {
+        "sample",
+        "participant",
+        "protocol",
+        "split",
+        "webcam_frame",
+        "webcam_timestamp",
+        "phonecam_frame",
+        "phonecam_timestamp",
+        "segment",
+        "target",
+        "direction",
+    }
+)
 
 
 def load_synchronized_pairs(path: Path) -> Tuple[SynchronizedPair, ...]:
@@ -58,8 +79,10 @@ def load_synchronized_pairs(path: Path) -> Tuple[SynchronizedPair, ...]:
                     y_norm=_optional_float(row, "y_norm", row_number),
                     protocol=row["protocol"],
                     split=row["split"],
+                    segment=row["segment"],
+                    target=row["target"],
+                    direction=row["direction"],
                     usable=_required_flag(row, "usable", row_number),
-                    training=_required_flag(row, "training", row_number),
                     valid=_required_flag(row, "valid", row_number),
                     invalid_reason=row["invalid_reason"],
                 )
@@ -67,6 +90,92 @@ def load_synchronized_pairs(path: Path) -> Tuple[SynchronizedPair, ...]:
     if not pairs:
         raise ContractError("Synchronized CSV contains no data rows.")
     return tuple(pairs)
+
+
+def load_selected_samples(path: Path) -> Tuple[SelectedSample, ...]:
+    """Load the one-best-pair manifest created by the click capture stage."""
+
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError("Selected sample CSV does not exist: %s" % resolved)
+    samples: List[SelectedSample] = []
+    seen_ids = set()
+    with resolved.open(encoding="utf-8", newline="") as file:
+        reader = csv.DictReader(file)
+        _validate_selected_sample_header(reader.fieldnames)
+        fieldnames = set(reader.fieldnames or ())
+        pair_column = "pair" if "pair" in fieldnames else "pair_frame"
+        for row_number, row in enumerate(reader, start=2):
+            sample_id = (row.get("sample") or "").strip()
+            participant = (row.get("participant") or "").strip()
+            if not sample_id:
+                raise ContractError("Row %d has an empty sample." % row_number)
+            if sample_id in seen_ids:
+                raise ContractError("Selected sample CSV contains duplicate sample %s." % sample_id)
+            if not participant:
+                raise ContractError("Row %d has an empty participant." % row_number)
+            seen_ids.add(sample_id)
+            sample = SelectedSample(
+                sample=sample_id,
+                participant=participant,
+                protocol=row["protocol"],
+                split=row["split"],
+                source_pair=_required_int(row, pair_column, row_number, minimum=0),
+                webcam_frame=_required_int(row, "webcam_frame", row_number, minimum=0),
+                phonecam_frame=_required_int(row, "phonecam_frame", row_number, minimum=0),
+                webcam_timestamp=_required_int(
+                    row, "webcam_timestamp", row_number, minimum=1
+                ),
+                phonecam_timestamp=_required_int(
+                    row, "phonecam_timestamp", row_number, minimum=1
+                ),
+                segment=(row.get("segment") or "").strip(),
+                target=(row.get("target") or "").strip(),
+                direction=(row.get("direction") or "").strip(),
+            )
+            if sample.export_partition is None:
+                raise ContractError(
+                    "Row %d split must be train/training or evaluation." % row_number
+                )
+            samples.append(sample)
+    if not samples:
+        raise ContractError("Selected sample CSV contains no data rows.")
+    return tuple(samples)
+
+
+def select_synchronized_samples(
+    pairs: Sequence[SynchronizedPair], samples: Sequence[SelectedSample]
+) -> Tuple[SelectedSynchronizedPair, ...]:
+    """Map each best-frame sample to the nearest valid synchronized frame pair.
+
+    The selected images were scored before camera-latency correction.  Matching
+    within the same protocol/segment keeps the click label fixed, while choosing
+    the closest camera frame numbers preserves the quality-selected instant.
+    The returned frames always come from ``synchronized_frames.csv``.
+    """
+
+    selected: List[SelectedSynchronizedPair] = []
+    used_pairs = set()
+    for sample in samples:
+        candidates = [
+            pair
+            for pair in pairs
+            if pair.pair not in used_pairs
+            and pair.participant == sample.participant
+            and pair.export_partition == sample.export_partition
+            and pair.protocol == sample.protocol
+            and pair.segment == sample.segment
+            and pair.target == sample.target
+            and pair.direction == sample.direction
+        ]
+        if not candidates:
+            raise ContractError(
+                "No valid synchronized pair matches selected sample %s." % sample.sample
+            )
+        chosen = min(candidates, key=lambda pair: _sample_distance(pair, sample))
+        used_pairs.add(chosen.pair)
+        selected.append(SelectedSynchronizedPair(sample=sample, synchronized=chosen))
+    return tuple(selected)
 
 
 def load_screen_size(participant_json: Path) -> Tuple[int, int]:
@@ -98,6 +207,35 @@ def _validate_header(fieldnames: Optional[Sequence[str]]) -> None:
         raise ContractError(
             "Synchronized CSV is missing columns: %s." % ", ".join(missing)
         )
+
+
+def _validate_selected_sample_header(fieldnames: Optional[Sequence[str]]) -> None:
+    if not fieldnames:
+        raise ContractError("Selected sample CSV must contain a header.")
+    duplicates = sorted({name for name in fieldnames if fieldnames.count(name) > 1})
+    if duplicates:
+        raise ContractError("Selected sample CSV contains duplicate columns.")
+    missing = sorted(SELECTED_SAMPLE_REQUIRED_COLUMNS - set(fieldnames))
+    if missing:
+        raise ContractError(
+            "Selected sample CSV is missing columns: %s." % ", ".join(missing)
+        )
+    if "pair" not in fieldnames and "pair_frame" not in fieldnames:
+        raise ContractError(
+            "Selected sample CSV is missing columns: pair (or legacy pair_frame)."
+        )
+
+
+def _sample_distance(pair: SynchronizedPair, sample: SelectedSample) -> Tuple[int, int, int]:
+    assert pair.webcam_frame is not None and pair.phonecam_frame is not None
+    assert pair.webcam_timestamp is not None and pair.phonecam_timestamp is not None
+    frame_distance = abs(pair.webcam_frame - sample.webcam_frame) + abs(
+        pair.phonecam_frame - sample.phonecam_frame
+    )
+    timestamp_distance = abs(pair.webcam_timestamp - sample.webcam_timestamp) + abs(
+        pair.phonecam_timestamp - sample.phonecam_timestamp
+    )
+    return frame_distance, timestamp_distance, pair.pair
 
 
 def _required_int(

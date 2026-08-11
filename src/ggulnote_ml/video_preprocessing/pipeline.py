@@ -28,7 +28,9 @@ from ggulnote_ml.video_preprocessing.mediapipe_landmarks import (
 )
 from ggulnote_ml.video_preprocessing.loader import (
     load_screen_size,
+    load_selected_samples,
     load_synchronized_pairs,
+    select_synchronized_samples,
 )
 from ggulnote_ml.video_preprocessing.processed_writer import (
     write_processed_feature_csv,
@@ -174,14 +176,18 @@ def run_video_preprocessing(
     synchronized_path = (
         participant_source / "synchronized" / "synchronized_frames.csv"
     )
+    selected_samples_path = participant_source / "labels" / "image_samples.csv"
     pairs = load_synchronized_pairs(synchronized_path)
+    selected_samples = load_selected_samples(selected_samples_path)
     if any(pair.participant != participant for pair in pairs):
         raise ContractError("Synchronized participant does not match the requested participant.")
+    if any(sample.participant != participant for sample in selected_samples):
+        raise ContractError("Selected sample participant does not match the requested participant.")
     screen_width, screen_height = load_screen_size(
         participant_source / "participant.json"
     )
-    export_pairs = tuple(pair for pair in pairs if pair.export_partition is not None)
-    if not export_pairs:
+    selected_pairs = select_synchronized_samples(pairs, selected_samples)
+    if not selected_pairs:
         raise ContractError("No synchronized training or evaluation pairs are exportable.")
 
     if cv2_module is None:
@@ -214,14 +220,15 @@ def run_video_preprocessing(
         phonecam_landmarks = stack.enter_context(
             landmark_extractor_factory("phonecam")
         )
-        for pair in export_pairs:
+        for selection in selected_pairs:
+            pair = selection.synchronized
             assert pair.webcam_frame is not None
             assert pair.phonecam_frame is not None
             partition = pair.export_partition
             assert partition is not None
             webcam_frame = webcam_decoder.read(pair.webcam_frame)
             phonecam_frame = phonecam_decoder.read(pair.phonecam_frame)
-            pair_id = "%s_pair_%08d" % (participant, pair.pair)
+            pair_id = "%s_%s" % (participant, selection.sample.sample)
             webcam_image_row = _write_view_image_and_row(
                 cv2_module,
                 destination_root,
@@ -293,10 +300,12 @@ def run_video_preprocessing(
         "schema_version": SCHEMA_VERSION,
         "participant": participant,
         "source_synchronized_csv": str(synchronized_path),
+        "source_image_samples_csv": str(selected_samples_path),
         "output_root": str(destination_root),
         "training_pairs": len(rows["training"]) // 2,
         "evaluation_pairs": len(rows["evaluation"]) // 2,
-        "excluded_pairs": len(pairs) - len(export_pairs),
+        "selected_pairs": len(selected_pairs),
+        "unselected_synchronized_pairs": len(pairs) - len(selected_pairs),
         "ear_threshold": ear_threshold,
         "video_feature_schema_version": VIDEO_FEATURE_SCHEMA_VERSION,
         "video_feature_order": list(VIDEO_FEATURE_NAMES),
@@ -378,7 +387,6 @@ def _write_view_image_and_row(
     return {
         "sample_id": "%s_%s" % (pair_id, view),
         "subject_id": pair.participant,
-        "session_id": "capture",
         "view": view,
         "image_path": relative_path,
         "pair_id": pair_id,
@@ -438,7 +446,6 @@ def _processed_feature_row(
         "y_norm": "%.8f" % pair.y_norm,
         "sync_valid": int(pair.valid),
         "usable": int(pair.usable),
-        "training": int(pair.training),
         "face_detected": int(features.face_detected),
         "iris_detected": int(features.iris_detected),
         "landmark_count": features.landmark_count,

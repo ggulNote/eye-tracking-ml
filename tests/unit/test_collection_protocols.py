@@ -16,8 +16,13 @@ from ggulnote_ml.capture.dataset import (
     normalize_participant_id,
     suggest_next_participant_id,
 )
-from ggulnote_ml.capture.frame_samples import IMAGE_SAMPLE_COLUMNS, FrameQualityScorer
+from ggulnote_ml.capture.frame_samples import (
+    IMAGE_SAMPLE_COLUMNS,
+    FrameQualityScorer,
+    FrameSampleWriter,
+)
 from ggulnote_ml.capture.protocols import (
+    ProtocolFrameState,
     ProtocolPlan,
     ProtocolRunner,
     ProtocolSegment,
@@ -25,6 +30,7 @@ from ggulnote_ml.capture.protocols import (
     normalized_coordinates,
 )
 from ggulnote_ml.capture.recorder import SessionRecorder
+from ggulnote_ml.video_preprocessing.mediapipe_landmarks import FaceIrisLandmarks
 
 
 def test_protocol_counts_randomization_and_splits():
@@ -52,6 +58,9 @@ def test_protocol_counts_randomization_and_splits():
     assert sum(plan.total_duration_ms for plan in (intro, train, transition, vertical, refix, evaluation)) == 128400
     assert config.preview.preflight_duration_ms == 5000
     assert config.preview.camera_width_px == 640
+    assert config.preview.require_face_landmarks is True
+    assert config.preview.required_consecutive_detections == 5
+    assert config.preview.landmark_detection_confidence == pytest.approx(0.3)
 
 
 def test_static_training_windows_match_protocol_contract():
@@ -92,18 +101,20 @@ def test_vertical_click_targets_traverse_each_column_down_and_up():
 
 
 def test_participant_suggestion_and_participant_no_overwrite(tmp_path):
-    (tmp_path / "p00").mkdir()
-    (tmp_path / "p02").mkdir()
-    assert suggest_next_participant_id(tmp_path) == "p03"
+    (tmp_path / "p00" / "labels").mkdir(parents=True)
+    (tmp_path / "p01" / "Calibration").mkdir(parents=True)
+    (tmp_path / "p02" / "labels").mkdir(parents=True)
+    # A calibration-only p01 directory is still available for its first capture.
+    assert suggest_next_participant_id(tmp_path) == "p01"
     assert normalize_participant_id("7") == "p07"
 
-    paths = create_participant_paths(tmp_path, "p03")
+    paths = create_participant_paths(tmp_path, "p01")
     assert paths.webcam_directory.name == "webcam"
     assert paths.phone_directory.name == "phonecam"
     assert paths.webcam_images_directory == paths.images_directory / "webcam"
     assert paths.phone_images_directory == paths.images_directory / "phonecam"
     with pytest.raises(FileExistsError):
-        create_participant_paths(tmp_path, "p03")
+        create_participant_paths(tmp_path, "p01")
 
 
 def test_simulation_writes_videos_pair_labels_and_unix_timestamps(tmp_path):
@@ -248,6 +259,72 @@ def test_quality_scorer_prefers_sharp_well_exposed_frame():
 
     assert sharp_quality.sharpness > flat_quality.sharpness
     assert sharp_quality.score > flat_quality.score
+
+
+class _FakeLandmarkExtractor:
+    def __init__(self, results):
+        self._results = iter(results)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return None
+
+    def extract(self, _frame):
+        return next(self._results)
+
+
+def test_sample_writer_prioritizes_pair_ready_for_b_mediapipe(tmp_path):
+    config = load_capture_config(Path("configs/capture.yaml"))
+    paths = create_participant_paths(tmp_path, "p00")
+    ready = FaceIrisLandmarks(True, True, ())
+    missing = FaceIrisLandmarks(False, False, ())
+    extractors = {
+        "webcam": _FakeLandmarkExtractor((ready, ready)),
+        "phonecam": _FakeLandmarkExtractor((missing, ready)),
+    }
+    state = ProtocolFrameState(
+        protocol_id="test",
+        split="train",
+        phase="target",
+        segment_index=0,
+        repeat_index=0,
+        target_index=0,
+        target_x=0.5,
+        target_y=0.5,
+        direction="static",
+        is_settling=False,
+        is_usable_window=True,
+        is_training_sample=True,
+        show_guide_line=False,
+        label_latency_ms=0.0,
+        confirmation_required=True,
+        is_confirmed=True,
+        confirmation_timestamp_ns=1_700_000_000_000_000_000,
+        confirmation_offset_ms=500.0,
+    )
+    frame = np.full((80, 120, 3), 128, dtype=np.uint8)
+    writer = FrameSampleWriter(
+        paths,
+        config.frame_capture,
+        config.display,
+        landmark_extractor_factory=lambda camera: extractors[camera],
+    )
+    try:
+        for pair in (1, 2):
+            packet = FramePacket(pair, float(pair), 1_700_000_000_000_000_000 + pair, frame)
+            writer.observe(pair, packet.unix_timestamp_ns, packet, packet, state)
+    finally:
+        writer.close()
+
+    with (paths.labels_directory / "image_samples.csv").open(
+        encoding="utf-8", newline=""
+    ) as file:
+        sample = next(csv.DictReader(file))
+    assert sample["pair"] == "2"
+    assert sample["webcam_mediapipe_iris_detected"] == "1"
+    assert sample["phonecam_mediapipe_iris_detected"] == "1"
 
 
 def test_label_writer_rejects_invalid_or_decreasing_display_timestamps(tmp_path):

@@ -30,6 +30,7 @@ def test_capture_config_loads_required_camera_roles_and_protocols():
     assert config.frame_capture.jpeg_quality == 95
     assert config.frame_capture.samples_per_target == 1
     assert config.frame_capture.eye_open_weight > config.frame_capture.face_weight
+    assert config.frame_capture.mediapipe_ready_weight == pytest.approx(1000.0)
 
 
 def test_capture_config_rejects_duplicate_device_indices(tmp_path):

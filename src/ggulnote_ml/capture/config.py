@@ -30,6 +30,9 @@ class PreviewConfig:
     window_name_prefix: str
     preflight_duration_ms: float
     camera_width_px: int
+    require_face_landmarks: bool
+    required_consecutive_detections: int
+    landmark_detection_confidence: float
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,7 @@ class FrameCaptureConfig:
     face_min_neighbors: int
     eye_scale_factor: float
     eye_min_neighbors: int
+    mediapipe_ready_weight: float
 
 
 @dataclass(frozen=True)
@@ -266,7 +270,26 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
         _required(preview_raw, "preflight_duration_ms", "preview")
     )
     preview_width_px = int(_required(preview_raw, "camera_width_px", "preview"))
-    if preview_duration_ms < 0 or preview_width_px <= 0:
+    preview_consecutive_detections = int(
+        _required(
+            preview_raw,
+            "required_consecutive_detections",
+            "preview",
+        )
+    )
+    preview_landmark_confidence = float(
+        _required(
+            preview_raw,
+            "landmark_detection_confidence",
+            "preview",
+        )
+    )
+    if (
+        preview_duration_ms < 0
+        or preview_width_px <= 0
+        or preview_consecutive_detections <= 0
+        or not 0.0 < preview_landmark_confidence <= 1.0
+    ):
         raise ValueError("Preview duration and camera width are invalid.")
     recording_raw = _mapping(raw, "recording")
     codec = str(_required(recording_raw, "video_codec", "recording"))
@@ -323,6 +346,13 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
         eye_min_neighbors=int(
             _required(frame_capture_raw, "eye_min_neighbors", "frame_capture")
         ),
+        mediapipe_ready_weight=float(
+            _required(
+                frame_capture_raw,
+                "mediapipe_ready_weight",
+                "frame_capture",
+            )
+        ),
     )
     if frame_capture.samples_per_target != 1:
         raise ValueError("frame_capture.samples_per_target must be 1 for best-frame mode.")
@@ -346,6 +376,8 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
         raise ValueError("frame_capture cascade scale factors must be greater than 1.")
     if frame_capture.face_min_neighbors <= 0 or frame_capture.eye_min_neighbors <= 0:
         raise ValueError("frame_capture cascade neighbor counts must be positive.")
+    if frame_capture.mediapipe_ready_weight <= 0:
+        raise ValueError("frame_capture.mediapipe_ready_weight must be positive.")
 
     display_raw = _mapping(raw, "display")
     canvas_width = int(_required(display_raw, "canvas_width", "display"))
@@ -428,6 +460,11 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
             window_name_prefix=str(_required(preview_raw, "window_name_prefix", "preview")),
             preflight_duration_ms=preview_duration_ms,
             camera_width_px=preview_width_px,
+            require_face_landmarks=bool(
+                _required(preview_raw, "require_face_landmarks", "preview")
+            ),
+            required_consecutive_detections=preview_consecutive_detections,
+            landmark_detection_confidence=preview_landmark_confidence,
         ),
         recording=RecordingConfig(
             enabled=bool(_required(recording_raw, "enabled", "recording")),

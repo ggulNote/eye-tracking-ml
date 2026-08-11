@@ -52,6 +52,8 @@
 | `webcam_timestamp` | 웹캠 프레임 수신 시각 |
 | `webcam_face_detected` | OpenCV 얼굴 검출 여부 |
 | `webcam_eyes_detected` | 검출된 눈 수, 최대 2 |
+| `webcam_mediapipe_face_detected` | 선택 후보의 MediaPipe 얼굴 검출 여부 |
+| `webcam_mediapipe_iris_detected` | 선택 후보의 MediaPipe refined iris 검출 여부 |
 | `webcam_sharpness` | 얼굴 ROI 또는 전체 프레임의 Laplacian 분산 |
 | `webcam_brightness` | 품질 평가 ROI 평균 밝기 |
 | `phonecam_image` | 참가자 폴더 기준 폰캠 이미지 상대 경로 |
@@ -59,6 +61,8 @@
 | `phonecam_timestamp` | 폰캠 프레임 수신 시각 |
 | `phonecam_face_detected` | OpenCV 얼굴 검출 여부 |
 | `phonecam_eyes_detected` | 검출된 눈 수, 최대 2 |
+| `phonecam_mediapipe_face_detected` | 선택 후보의 MediaPipe 얼굴 검출 여부 |
+| `phonecam_mediapipe_iris_detected` | 선택 후보의 MediaPipe refined iris 검출 여부 |
 | `phonecam_sharpness` | 얼굴 ROI 또는 전체 프레임의 Laplacian 분산 |
 | `phonecam_brightness` | 품질 평가 ROI 평균 밝기 |
 | `x_px`, `y_px` | 표적 화면 픽셀 좌표 |
@@ -68,7 +72,9 @@
 | `target` | 표적 위치 ID |
 | `direction` | 표적 진행 방향 |
 
-`eyes_detected > 0`이면 수집 단계에서 눈이 열린 후보로 취급합니다. 최종 눈 감김 판정은 B 담당 MediaPipe 전처리가 수행합니다.
+실제 촬영에서는 MediaPipe 얼굴+홍채 검출 성공을 가장 큰 우선순위로 두고,
+OpenCV 눈 검출·선명도·노출을 보조 점수로 사용합니다. 최종 눈 감김 판정은 B
+MediaPipe 전처리가 수행합니다.
 
 ### `events/<protocol>.csv`
 
@@ -163,7 +169,45 @@
 
 이 파일은 계산 결과 감사용이므로 레이턴시와 보정 전·후 timestamp를 모두 유지합니다.
 
-## 4. 학습 파이프라인 CSV 인터페이스
+## 4. 영상 MediaPipe 전처리
+
+### `manifests/p00_training.csv`, `p00_evaluation.csv`
+
+점당 하나의 레이턴시 보정 이미지와 정답 좌표를 카메라별 한 행으로 연결합니다.
+
+```text
+sample_id,subject_id,view,image_path,pair_id,
+target_x_px,target_y_px,screen_width_px,screen_height_px,
+collection_split,protocol,source_frame,source_timestamp,
+corrected_timestamp,reference_timestamp,target_timestamp
+```
+
+`collection_split`은 B 출력에서 `training` 또는 `evaluation`입니다. 입력 A CSV에서는 `split=train` 또는 `split=evaluation`을 사용합니다.
+
+### 카메라별 `processed_features.csv`
+
+### `p00_video_training.csv`, `p00_video_evaluation.csv`
+
+두 종류의 CSV는 같은 열 규격을 사용합니다.
+
+```text
+schema_version,sample_id,participant,camera,pair_id,pair,
+source_frame,source_timestamp,corrected_timestamp,
+reference_timestamp,target_timestamp,protocol,collection_split,
+x_norm,y_norm,sync_valid,usable,
+face_detected,iris_detected,landmark_count,
+left_ear,right_ear,left_eye_closed,right_eye_closed,eye_closed,
+feature_valid,invalid_reason,
+left_eye_center_x,left_eye_center_y,
+left_iris_center_x,left_iris_center_y,
+right_eye_center_x,right_eye_center_y,
+right_iris_center_x,right_iris_center_y,
+image_path
+```
+
+8차원 특징은 두 눈 중심과 두 홍채 중심의 정규화된 2D `(x,y)`입니다. `training` 열은 `collection_split`과 중복되므로 저장하지 않습니다.
+
+## 5. 학습 파이프라인 CSV 인터페이스
 
 ### 입력 manifest CSV
 

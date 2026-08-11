@@ -119,6 +119,18 @@ python -m ggulnote_ml.synchronization \
   --participant p00
 ```
 
+장비, 해상도, FPS, 카메라 연결 방식과 위치가 모두 동일한 상태에서 바로 이어서
+새 참가자를 촬영했다면 기존 측정값을 명시적으로 재사용할 수 있습니다. 경로를 직접
+지정한 경우에만 참가자 ID가 다른 레이턴시 파일을 허용하며, 출력 요약에는 사용한
+원본 경로가 남습니다.
+
+```bash
+python -m ggulnote_ml.synchronization \
+  --synchronize \
+  --participant p02 \
+  --latency-json data/raw/participants/p00/Calibration/latency.json
+```
+
 처리 순서:
 
 1. 웹캠 timestamp에서 웹캠 median latency를 뺍니다.

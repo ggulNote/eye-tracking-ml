@@ -73,6 +73,9 @@ def run(args: argparse.Namespace) -> Path:
             latency_path,
             output_path,
             latency_config.matching,
+            # An explicit calibration path permits deliberate reuse for a new
+            # participant when the devices and camera setup have not changed.
+            allow_shared_latency=args.latency_json is not None,
         )
         summary_path = output_path.parent / "synchronization.json"
         write_synchronization_summary(summary_path, summary)

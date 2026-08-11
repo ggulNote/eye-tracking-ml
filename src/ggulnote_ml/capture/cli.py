@@ -10,7 +10,11 @@ from typing import Optional, Sequence
 
 from .calibration_assets import inspect_calibration_assets
 from .camera import probe_camera_indices
-from .collection import run_real_protocols, run_simulation_protocols
+from .collection import (
+    run_camera_preflight,
+    run_real_protocols,
+    run_simulation_protocols,
+)
 from .config import CaptureConfig, load_capture_config
 from .dataset import (
     create_participant_paths,
@@ -43,6 +47,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Allow an uncalibrated hardware smoke test and record it in participant.json",
     )
     parser.add_argument("--list-cameras", action="store_true")
+    parser.add_argument(
+        "--check-cameras",
+        action="store_true",
+        help="Preview both cameras and require MediaPipe face+iris readiness without saving data",
+    )
     parser.add_argument("--max-devices", type=int, default=10)
     parser.add_argument("--suggest-participant", action="store_true")
     return parser.parse_args(argv)
@@ -138,7 +147,9 @@ def run_collection(args: argparse.Namespace) -> Path:
             "manifest": "labels/image_samples.csv",
             "scope": "one_best_pair_per_confirmed_target",
             "samples_per_target": config.frame_capture.samples_per_target,
-            "quality_heuristic": "haar_eye_face_laplacian_sharpness_exposure",
+            "quality_heuristic": (
+                "mediapipe_face_iris_then_haar_sharpness_exposure"
+            ),
         },
         "participant_metadata": participant_metadata,
         "calibration_assets": calibration,
@@ -192,6 +203,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 raise ValueError("--max-devices must be positive.")
             indices = probe_camera_indices(args.max_devices, config.cameras[0].backend)
             print("Available camera indices: %s" % (indices if indices else "none"))
+            return
+        if args.check_cameras:
+            run_camera_preflight(config)
+            print("Camera preflight passed for webcam and phonecam.")
             return
         run_collection(args)
     except (FileExistsError, FileNotFoundError, ValueError, RuntimeError) as error:

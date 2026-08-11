@@ -126,3 +126,23 @@ def test_synchronization_rejects_participant_mismatch(tmp_path):
 
     with pytest.raises(ValueError, match="does not match"):
         synchronize_labels(labels, latency, tmp_path / "out.csv", config.matching)
+
+
+def test_synchronization_allows_explicit_shared_latency(tmp_path):
+    config = load_latency_config(Path("configs/latency.yaml"))
+    labels = tmp_path / "labels.csv"
+    latency = tmp_path / "latency.json"
+    output = tmp_path / "out.csv"
+    _write_dynamic_labels(labels)
+    _write_latency(latency, participant="p01")
+
+    summary = synchronize_labels(
+        labels,
+        latency,
+        output,
+        config.matching,
+        allow_shared_latency=True,
+    )
+
+    assert summary["participant"] == "p00"
+    assert summary["valid_pairs"] == 4

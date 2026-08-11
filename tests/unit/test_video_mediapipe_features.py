@@ -50,6 +50,24 @@ def test_ear_and_both_eyes_closed_policy():
     assert closed.eye_closed is True
 
 
+def test_one_hidden_or_closed_eye_remains_usable():
+    values = list(_landmarks(vertical=0.03))
+    almost_closed = _landmarks(vertical=0.005)
+    for index in (362, 385, 387, 263, 373, 380):
+        values[index] = almost_closed[index]
+
+    features = extract_video_frame_features(
+        FaceIrisLandmarks(True, True, tuple(values)),
+        ear_threshold=0.20,
+    )
+
+    assert features.eye_state.left_eye_closed is True
+    assert features.eye_state.right_eye_closed is False
+    assert features.eye_state.eye_closed is False
+    assert features.feature_valid is True
+    assert len(features.values) == 8
+
+
 def test_eight_dimensional_feature_order_and_invalid_states():
     detected = FaceIrisLandmarks(True, True, _landmarks())
     features = extract_video_frame_features(detected, ear_threshold=0.20)

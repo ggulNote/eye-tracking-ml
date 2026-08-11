@@ -54,11 +54,21 @@ def existing_participant_ids(dataset_root: Path) -> Iterable[str]:
 
 
 def suggest_next_participant_id(dataset_root: Path) -> str:
-    numbers = [int(participant[1:]) for participant in existing_participant_ids(dataset_root)]
-    next_number = max(numbers, default=-1) + 1
-    if next_number > 99:
-        raise ValueError("Participant id space is exhausted at p99.")
-    return "p%02d" % next_number
+    resolved = dataset_root.expanduser().resolve()
+    for number in range(100):
+        participant_id = "p%02d" % number
+        participant_directory = resolved / participant_id
+        capture_outputs = (
+            participant_directory / "webcam",
+            participant_directory / "phonecam",
+            participant_directory / "images",
+            participant_directory / "labels",
+            participant_directory / "events",
+            participant_directory / "participant.json",
+        )
+        if not any(path.exists() for path in capture_outputs):
+            return participant_id
+    raise ValueError("Participant id space is exhausted at p99.")
 
 
 def create_participant_paths(dataset_root: Path, participant_id: str) -> ParticipantPaths:

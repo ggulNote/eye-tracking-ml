@@ -75,7 +75,13 @@ GUI 지원 OpenCV를 별도로 설치한 뒤 연결 가능한 카메라 번호�
 ```bash
 make setup-capture
 make list-cameras
+make check-cameras
 ```
+
+`check-cameras`는 데이터를 만들지 않고 두 카메라를 엽니다. 웹캠은 정면 얼굴,
+phonecam은 한쪽 눈이 보이는 측면 얼굴을 허용하지만 두 영상 모두 MediaPipe
+face+iris 검출이 연속 5프레임 성공해야 통과합니다. phonecam에서도 얼굴 윤곽은
+프레임 안에 남겨야 합니다.
 
 다음 참가자 번호를 확인하고 simulation으로 저장 계약을 먼저 검증합니다.
 
@@ -89,6 +95,20 @@ make simulate PARTICIPANT=p00 PROTOCOL=all DATASET_ROOT=/private/tmp/gaze-simula
 ```bash
 make collect PARTICIPANT=p00
 ```
+
+A+B 전체 새 데이터 흐름은 같은 참가자 번호로 아래 순서를 지킵니다. 카메라 검사
+후에는 위치·해상도·연결 방식을 바꾸지 않습니다.
+
+```bash
+make check-cameras
+make measure-latency PARTICIPANT=p00
+make collect PARTICIPANT=p00 ALLOW_MISSING_CALIBRATION=1
+make sync-participant PARTICIPANT=p00
+make video-features PARTICIPANT=p00
+```
+
+레이턴시 측정만 들어 있는 `p00/Calibration` 폴더는 이미 수집된 참가자로 세지지
+않으므로, 이어지는 수집에서도 `p00`을 그대로 사용할 수 있습니다.
 
 데이터는 `data/raw/participants/p00/` 아래에 생성됩니다. 참가자마다 한 번만 수집하며 정면 카메라는 `webcam/capture.mp4`, 참가자 좌측 30–45° iPhone은 `phonecam/capture.mp4`에 저장합니다. 정적 학습 3×9, 세로 왕복 3열×6점, 정적 평가 3×6은 참가자가 점을 제대로 본 뒤 마우스 왼쪽 버튼 또는 Space로 확정합니다. 각 클릭 후 안정 구간에서 눈 검출·얼굴 검출·선명도·노출을 기준으로 가장 좋은 프레임 한 쌍만 `images/webcam`, `images/phonecam`에 같은 sample ID로 저장하고 `labels/image_samples.csv`에서 원본 영상 프레임·좌표와 연결합니다.
 
@@ -108,5 +128,6 @@ make check
 - [모델 파이프라인](docs/model-pipeline.md)
 - [WebEyeTrack 입출력 규격](docs/webeyetrack-data-contract.md)
 - [다중 카메라 캡처](docs/multi-camera-capture.md)
+- [A+B 영상 전처리 연결](docs/video-preprocessing-handoff.md)
 - [CSV 스키마 전체 목록](docs/csv-schemas.md)
 - [협업 규칙](CONTRIBUTING.md)

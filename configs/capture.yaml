@@ -33,6 +33,12 @@ preview:
   window_name_prefix: Gaze Capture
   preflight_duration_ms: 5000
   camera_width_px: 640
+  # A+B 통합 수집에서는 녹화 전에 두 영상 모두 MediaPipe 입력으로 쓸 수
+  # 있는지 확인합니다. phonecam은 한쪽 눈만 보여도 되지만 얼굴 윤곽은
+  # 프레임 안에 있어야 하며 FaceMesh+iris 검출이 연속으로 성공해야 합니다.
+  require_face_landmarks: true
+  required_consecutive_detections: 5
+  landmark_detection_confidence: 0.3
 
 recording:
   enabled: true
@@ -60,6 +66,9 @@ frame_capture:
   face_min_neighbors: 5
   eye_scale_factor: 1.1
   eye_min_neighbors: 4
+  # A의 Haar/선명도 점수보다 B의 실제 FaceMesh+iris 성공을 우선합니다.
+  # 양쪽 카메라 모두 성공한 후보가 있으면 그 프레임 쌍이 선택됩니다.
+  mediapipe_ready_weight: 1000.0
 
 display:
   window_name: Gaze Collection

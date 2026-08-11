@@ -5,16 +5,20 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from ggulnote_ml.capture.frame_samples import IMAGE_SAMPLE_COLUMNS
 from ggulnote_ml.exceptions import ContractError
 from ggulnote_ml.synchronization.matching import SYNC_COLUMNS
 from ggulnote_ml.video_preprocessing.contracts import (
+    DUAL_VIEW_MANIFEST_COLUMNS,
     IMAGE_PIPELINE_REQUIRED_COLUMNS,
+    PROCESSED_FEATURE_COLUMNS,
     VIDEO_FEATURE_NAMES,
 )
 from ggulnote_ml.video_preprocessing.mediapipe_landmarks import (
     FaceIrisLandmarks,
     NormalizedLandmark,
 )
+from ggulnote_ml.video_preprocessing.loader import load_selected_samples
 from ggulnote_ml.video_preprocessing.pipeline import run_video_preprocessing
 
 
@@ -68,7 +72,7 @@ class _FakeLandmarkExtractor:
         return result
 
 
-def _synchronized_row(pair, split, training, valid=True):
+def _synchronized_row(pair, split, valid=True):
     row = {column: "" for column in SYNC_COLUMNS}
     base = 1_700_000_000_000_000_000 + pair * 10_000_000
     row.update(
@@ -92,18 +96,58 @@ def _synchronized_row(pair, split, training, valid=True):
             "y_centered": "-0.250000",
             "protocol": "static_grid",
             "split": split,
-            "segment": 0,
-            "repeat": 0,
+            "segment": pair,
             "target": pair,
-            "direction": "",
-            "settling": 0,
+            "direction": "static",
             "usable": 1,
-            "training": int(training),
             "target_interpolated": 0,
             "valid_sync": int(valid),
             "valid_target": int(valid),
             "valid": int(valid),
             "invalid_reason": "" if valid else "time_diff_exceeded",
+        }
+    )
+    return row
+
+
+def _image_sample_row(sample, pair, split):
+    row = {column: "" for column in IMAGE_SAMPLE_COLUMNS}
+    base = 1_700_000_000_000_000_000 + pair * 10_000_000
+    row.update(
+        {
+            "sample": sample,
+            "participant": "p00",
+            "protocol": "static_grid",
+            "split": split,
+            "pair": pair,
+            "display_timestamp": base - 1_000,
+            "confirmation_timestamp": base - 500,
+            "confirmation_offset_ms": "600.000",
+            "candidate_count": 5,
+            "pair_quality_score": "100.000000",
+            "webcam_image": "images/webcam/%s.jpg" % sample,
+            "webcam_frame": pair,
+            "webcam_timestamp": base + 100,
+            "webcam_face_detected": 1,
+            "webcam_eyes_detected": 2,
+            "webcam_sharpness": "100.000000",
+            "webcam_brightness": "128.000000",
+            "phonecam_image": "images/phonecam/%s.jpg" % sample,
+            "phonecam_frame": pair,
+            "phonecam_timestamp": base + 200,
+            "phonecam_face_detected": 1,
+            "phonecam_eyes_detected": 2,
+            "phonecam_sharpness": "100.000000",
+            "phonecam_brightness": "128.000000",
+            "x_px": 960,
+            "y_px": 270,
+            "x_norm": "0.500000",
+            "y_norm": "0.250000",
+            "x_centered": "0.000000",
+            "y_centered": "-0.250000",
+            "segment": pair,
+            "target": pair,
+            "direction": "static",
         }
     )
     return row
@@ -136,10 +180,35 @@ def _build_source_dataset(tmp_path):
     with synchronized.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=SYNC_COLUMNS)
         writer.writeheader()
-        writer.writerow(_synchronized_row(0, "training", True))
-        writer.writerow(_synchronized_row(1, "evaluation", False))
-        writer.writerow(_synchronized_row(2, "training", True, valid=False))
+        writer.writerow(_synchronized_row(0, "train"))
+        writer.writerow(_synchronized_row(1, "evaluation"))
+        writer.writerow(_synchronized_row(2, "train", valid=False))
+    image_samples = participant / "labels" / "image_samples.csv"
+    with image_samples.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=IMAGE_SAMPLE_COLUMNS)
+        writer.writeheader()
+        writer.writerow(_image_sample_row("s000000", 0, "train"))
+        writer.writerow(_image_sample_row("s000001", 1, "evaluation"))
     return dataset_root, participant, synchronized
+
+
+def test_selected_samples_accepts_legacy_pair_frame_column(tmp_path):
+    path = tmp_path / "image_samples.csv"
+    columns = tuple(
+        "pair_frame" if column == "pair" else column
+        for column in IMAGE_SAMPLE_COLUMNS
+    )
+    row = _image_sample_row("s000000", 7, "train")
+    row["pair_frame"] = row.pop("pair")
+    with path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=columns)
+        writer.writeheader()
+        writer.writerow(row)
+
+    samples = load_selected_samples(path)
+
+    assert len(samples) == 1
+    assert samples[0].source_pair == 7
 
 
 def _fake_cv2(participant):
@@ -209,10 +278,12 @@ def test_video_preprocessing_exports_separate_main_compatible_manifests(tmp_path
     evaluation_rows = _read_rows(result.evaluation_manifest)
     assert len(training_rows) == 2
     assert len(evaluation_rows) == 2
+    assert tuple(training_rows[0]) == DUAL_VIEW_MANIFEST_COLUMNS
+    assert tuple(evaluation_rows[0]) == DUAL_VIEW_MANIFEST_COLUMNS
     assert IMAGE_PIPELINE_REQUIRED_COLUMNS <= set(training_rows[0])
     assert {row["view"] for row in training_rows} == {"webcam", "phonecam"}
-    assert {row["pair_id"] for row in training_rows} == {"p00_pair_00000000"}
-    assert {row["pair_id"] for row in evaluation_rows} == {"p00_pair_00000001"}
+    assert {row["pair_id"] for row in training_rows} == {"p00_s000000"}
+    assert {row["pair_id"] for row in evaluation_rows} == {"p00_s000001"}
     assert {row["collection_split"] for row in training_rows} == {"training"}
     assert {row["collection_split"] for row in evaluation_rows} == {"evaluation"}
     assert {row["source_frame"] for row in training_rows} == {"0"}
@@ -228,6 +299,7 @@ def test_video_preprocessing_exports_separate_main_compatible_manifests(tmp_path
     assert {row["target_y_px"] for row in training_rows} == {"270.000000"}
     for row in training_rows + evaluation_rows:
         assert (output_root / row["image_path"]).is_file()
+        assert "session_id" not in row
 
     webcam_features = _read_rows(result.webcam_features)
     phonecam_features = _read_rows(result.phonecam_features)
@@ -237,10 +309,13 @@ def test_video_preprocessing_exports_separate_main_compatible_manifests(tmp_path
     assert len(phonecam_features) == 2
     assert len(video_training) == 2
     assert len(video_evaluation) == 2
+    assert tuple(webcam_features[0]) == PROCESSED_FEATURE_COLUMNS
+    assert tuple(phonecam_features[0]) == PROCESSED_FEATURE_COLUMNS
     assert set(VIDEO_FEATURE_NAMES) <= set(video_training[0])
     assert {row["camera"] for row in video_training} == {"webcam", "phonecam"}
     assert {row["collection_split"] for row in video_training} == {"training"}
     assert {row["collection_split"] for row in video_evaluation} == {"evaluation"}
+    assert all("training" not in row for row in video_training + video_evaluation)
     missing_face = [row for row in video_evaluation if row["camera"] == "phonecam"]
     assert missing_face[0]["face_detected"] == "0"
     assert missing_face[0]["landmark_count"] == "0"
@@ -251,7 +326,8 @@ def test_video_preprocessing_exports_separate_main_compatible_manifests(tmp_path
     summary = json.loads(result.summary_json.read_text(encoding="utf-8"))
     assert summary["training_pairs"] == 1
     assert summary["evaluation_pairs"] == 1
-    assert summary["excluded_pairs"] == 1
+    assert summary["selected_pairs"] == 2
+    assert summary["unselected_synchronized_pairs"] == 1
     assert summary["valid_feature_rows"] == 3
     assert summary["training_feature_pairs"] == 1
     assert summary["face_not_detected_rows"] == 1

@@ -7,8 +7,11 @@ PARTICIPANT ?=
 PROTOCOL ?=all
 ALLOW_MISSING_CALIBRATION ?=
 DATASET_ROOT ?=
+LATENCY_JSON ?=
+OUTPUT_ROOT ?=data/interim/dual_view
+EAR_THRESHOLD ?=0.20
 
-.PHONY: setup setup-video setup-capture collect simulate suggest-participant list-cameras validate preprocess smoke train evaluate predict test check mlflow
+.PHONY: setup setup-video setup-capture collect simulate suggest-participant list-cameras check-cameras measure-latency sync-participant video-features validate preprocess smoke train evaluate predict test check mlflow
 
 setup:
 	python3 -m venv .venv
@@ -37,6 +40,21 @@ suggest-participant:
 
 list-cameras:
 	$(PYTHON) -m ggulnote_ml.capture --config configs/capture.yaml --list-cameras
+
+check-cameras:
+	$(PYTHON) -m ggulnote_ml.capture --config configs/capture.yaml --check-cameras
+
+measure-latency:
+	@test -n "$(PARTICIPANT)" || (echo "PARTICIPANT=p00 is required" && exit 2)
+	$(PYTHON) -m ggulnote_ml.synchronization --participant $(PARTICIPANT)
+
+sync-participant:
+	@test -n "$(PARTICIPANT)" || (echo "PARTICIPANT=p00 is required" && exit 2)
+	$(PYTHON) -m ggulnote_ml.synchronization --synchronize --participant $(PARTICIPANT) $(if $(LATENCY_JSON),--latency-json $(LATENCY_JSON),)
+
+video-features:
+	@test -n "$(PARTICIPANT)" || (echo "PARTICIPANT=p00 is required" && exit 2)
+	$(PYTHON) -m ggulnote_ml.video_preprocessing --participant $(PARTICIPANT) --dataset-root data/raw/participants --output-root $(OUTPUT_ROOT) --ear-threshold $(EAR_THRESHOLD)
 
 validate:
 	$(PYTHON) -m ggulnote_ml validate-config --config $(CONFIG)

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from contextlib import ExitStack
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -12,6 +13,9 @@ from .config import DisplayConfig, FrameCaptureConfig
 from .contracts import FramePacket
 from .dataset import ParticipantPaths
 from .protocols import ProtocolFrameState, normalized_coordinates
+from ggulnote_ml.video_preprocessing.mediapipe_landmarks import (
+    MediaPipeFaceIrisExtractor,
+)
 
 
 IMAGE_SAMPLE_COLUMNS = (
@@ -30,6 +34,8 @@ IMAGE_SAMPLE_COLUMNS = (
     "webcam_timestamp",
     "webcam_face_detected",
     "webcam_eyes_detected",
+    "webcam_mediapipe_face_detected",
+    "webcam_mediapipe_iris_detected",
     "webcam_sharpness",
     "webcam_brightness",
     "phonecam_image",
@@ -37,6 +43,8 @@ IMAGE_SAMPLE_COLUMNS = (
     "phonecam_timestamp",
     "phonecam_face_detected",
     "phonecam_eyes_detected",
+    "phonecam_mediapipe_face_detected",
+    "phonecam_mediapipe_iris_detected",
     "phonecam_sharpness",
     "phonecam_brightness",
     "x_px",
@@ -59,6 +67,12 @@ class FrameQuality:
     sharpness: float
     brightness: float
     score: float
+    mediapipe_face_detected: bool = False
+    mediapipe_iris_detected: bool = False
+
+    @property
+    def mediapipe_ready(self) -> bool:
+        return self.mediapipe_face_detected and self.mediapipe_iris_detected
 
 
 @dataclass(frozen=True)
@@ -168,6 +182,8 @@ class FrameSampleWriter:
         paths: ParticipantPaths,
         config: FrameCaptureConfig,
         display: DisplayConfig,
+        enable_mediapipe_quality: bool = True,
+        landmark_extractor_factory=None,
     ) -> None:
         self.paths = paths
         self.config = config
@@ -180,8 +196,18 @@ class FrameSampleWriter:
         self._file = None
         self._writer = None
         self._scorer = None
+        self._landmark_stack = ExitStack()
+        self._landmark_extractors = None
         if config.enabled:
             self._scorer = FrameQualityScorer(config)
+            if enable_mediapipe_quality:
+                factory = landmark_extractor_factory or (
+                    lambda _camera: MediaPipeFaceIrisExtractor()
+                )
+                self._landmark_extractors = {
+                    camera: self._landmark_stack.enter_context(factory(camera))
+                    for camera in ("webcam", "phonecam")
+                }
             self._file = self.manifest_path.open("x", encoding="utf-8", newline="")
             self._writer = csv.DictWriter(self._file, fieldnames=IMAGE_SAMPLE_COLUMNS)
             self._writer.writeheader()
@@ -218,7 +244,32 @@ class FrameSampleWriter:
         self._active_key = key
         webcam_quality = self._scorer.score(webcam.frame)
         phonecam_quality = self._scorer.score(phonecam.frame)
-        combined_score = webcam_quality.score + phonecam_quality.score
+        if self._landmark_extractors is not None:
+            webcam_landmarks = self._landmark_extractors["webcam"].extract(
+                webcam.frame
+            )
+            phonecam_landmarks = self._landmark_extractors["phonecam"].extract(
+                phonecam.frame
+            )
+            webcam_quality = replace(
+                webcam_quality,
+                mediapipe_face_detected=webcam_landmarks.face_detected,
+                mediapipe_iris_detected=webcam_landmarks.iris_detected,
+            )
+            phonecam_quality = replace(
+                phonecam_quality,
+                mediapipe_face_detected=phonecam_landmarks.face_detected,
+                mediapipe_iris_detected=phonecam_landmarks.iris_detected,
+            )
+        combined_score = (
+            webcam_quality.score
+            + phonecam_quality.score
+            + self.config.mediapipe_ready_weight
+            * (
+                int(webcam_quality.mediapipe_ready)
+                + int(phonecam_quality.mediapipe_ready)
+            )
+        )
         self._candidate_count += 1
         if self._best is None or combined_score > self._best.combined_score:
             self._best = _CandidatePair(
@@ -296,6 +347,12 @@ class FrameSampleWriter:
                 "webcam_timestamp": candidate.webcam.unix_timestamp_ns,
                 "webcam_face_detected": int(webcam_quality.face_detected),
                 "webcam_eyes_detected": webcam_quality.eyes_detected,
+                "webcam_mediapipe_face_detected": int(
+                    webcam_quality.mediapipe_face_detected
+                ),
+                "webcam_mediapipe_iris_detected": int(
+                    webcam_quality.mediapipe_iris_detected
+                ),
                 "webcam_sharpness": "%.6f" % webcam_quality.sharpness,
                 "webcam_brightness": "%.6f" % webcam_quality.brightness,
                 "phonecam_image": str(phonecam_path.relative_to(self.paths.participant_directory)),
@@ -303,6 +360,12 @@ class FrameSampleWriter:
                 "phonecam_timestamp": candidate.phonecam.unix_timestamp_ns,
                 "phonecam_face_detected": int(phonecam_quality.face_detected),
                 "phonecam_eyes_detected": phonecam_quality.eyes_detected,
+                "phonecam_mediapipe_face_detected": int(
+                    phonecam_quality.mediapipe_face_detected
+                ),
+                "phonecam_mediapipe_iris_detected": int(
+                    phonecam_quality.mediapipe_iris_detected
+                ),
                 "phonecam_sharpness": "%.6f" % phonecam_quality.sharpness,
                 "phonecam_brightness": "%.6f" % phonecam_quality.brightness,
                 "x_px": x_px,
@@ -333,3 +396,4 @@ class FrameSampleWriter:
         if self._file is not None:
             self._file.close()
             self._file = None
+        self._landmark_stack.close()

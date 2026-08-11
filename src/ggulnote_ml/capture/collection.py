@@ -23,6 +23,10 @@ from .protocols import (
     write_protocol_events,
 )
 from .recorder import SessionRecorder
+from ggulnote_ml.video_preprocessing.mediapipe_landmarks import (
+    FaceIrisLandmarks,
+    MediaPipeFaceIrisExtractor,
+)
 
 
 LABEL_COLUMNS = (
@@ -235,6 +239,9 @@ def _preflight_canvas(
     phonecam: FramePacket,
     camera_width_px: int,
     remaining_seconds: float,
+    landmark_results: Optional[Dict[str, FaceIrisLandmarks]] = None,
+    successful_detections: int = 0,
+    required_detections: int = 0,
 ) -> np.ndarray:
     """Build a labeled side-by-side preview without modifying source frames."""
 
@@ -246,24 +253,48 @@ def _preflight_canvas(
             packet.frame,
             (camera_width_px, max(1, round(height * scale))),
         )
+        result = landmark_results.get(label) if landmark_results else None
+        status = ""
+        color = (0, 255, 0)
+        if result is not None:
+            valid = result.face_detected and result.iris_detected
+            status = " - MediaPipe OK" if valid else " - ADJUST CAMERA"
+            color = (0, 255, 0) if valid else (0, 0, 255)
         cv2.putText(
             panel,
-            label,
+            label + status,
             (16, 32),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
-            (0, 255, 0),
+            color,
             2,
             cv2.LINE_AA,
         )
         panels.append(panel)
     canvas = cv2.hconcat(panels)
+    if landmark_results:
+        cv2.putText(
+            canvas,
+            "MediaPipe stability %d/%d (q/Esc: abort)"
+            % (successful_detections, required_detections),
+            (16, canvas.shape[0] - 44),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        footer = "phonecam: one visible eye is OK; keep the full face outline in frame"
+    else:
+        footer = "Camera check %.1fs - keep both feeds moving" % max(
+            0.0, remaining_seconds
+        )
     cv2.putText(
         canvas,
-        "Camera check %.1fs - keep both feeds moving" % max(0.0, remaining_seconds),
-        (16, canvas.shape[0] - 18),
+        footer,
+        (16, canvas.shape[0] - 16),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
+        0.54,
         (0, 255, 255),
         2,
         cv2.LINE_AA,
@@ -283,28 +314,67 @@ def _run_camera_preflight(
     started_ns = time.monotonic_ns()
     window_name = "%s - preflight" % config.preview.window_name_prefix
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    try:
-        while True:
-            elapsed_ms = (time.monotonic_ns() - started_ns) / 1_000_000.0
-            if elapsed_ms >= config.preview.preflight_duration_ms:
-                break
-            webcam = webcam_source.read(started_ns)
-            phonecam = phone_source.read(started_ns)
-            remaining_seconds = (config.preview.preflight_duration_ms - elapsed_ms) / 1000.0
-            cv2.imshow(
-                window_name,
-                _preflight_canvas(
-                    webcam,
-                    phonecam,
-                    config.preview.camera_width_px,
-                    remaining_seconds,
-                ),
-            )
-            key = cv2.waitKey(1) & 0xFF
-            if key in {ord("q"), 27}:
-                raise RuntimeError("Camera preflight was aborted.")
-    finally:
-        cv2.destroyWindow(window_name)
+    successful_detections = 0
+    with ExitStack() as stack:
+        extractors = None
+        if config.preview.require_face_landmarks:
+            extractors = {
+                camera: stack.enter_context(
+                    MediaPipeFaceIrisExtractor(
+                        min_detection_confidence=(
+                            config.preview.landmark_detection_confidence
+                        )
+                    )
+                )
+                for camera in ("webcam", "phonecam")
+            }
+
+        try:
+            while True:
+                elapsed_ms = (time.monotonic_ns() - started_ns) / 1_000_000.0
+                webcam = webcam_source.read(started_ns)
+                phonecam = phone_source.read(started_ns)
+                results = None
+                if extractors is not None:
+                    results = {
+                        "webcam": extractors["webcam"].extract(webcam.frame),
+                        "phonecam": extractors["phonecam"].extract(phonecam.frame),
+                    }
+                    both_valid = all(
+                        result.face_detected and result.iris_detected
+                        for result in results.values()
+                    )
+                    successful_detections = (
+                        successful_detections + 1 if both_valid else 0
+                    )
+                remaining_seconds = (
+                    config.preview.preflight_duration_ms - elapsed_ms
+                ) / 1000.0
+                cv2.imshow(
+                    window_name,
+                    _preflight_canvas(
+                        webcam,
+                        phonecam,
+                        config.preview.camera_width_px,
+                        remaining_seconds,
+                        results,
+                        successful_detections,
+                        config.preview.required_consecutive_detections,
+                    ),
+                )
+                key = cv2.waitKey(1) & 0xFF
+                if key in {ord("q"), 27}:
+                    raise RuntimeError("Camera preflight was aborted.")
+                duration_complete = elapsed_ms >= config.preview.preflight_duration_ms
+                landmarks_complete = (
+                    extractors is None
+                    or successful_detections
+                    >= config.preview.required_consecutive_detections
+                )
+                if duration_complete and landmarks_complete:
+                    break
+        finally:
+            cv2.destroyWindow(window_name)
     webcam_source.reset_session()
     phone_source.reset_session()
 
@@ -411,6 +481,21 @@ def run_real_protocols(
         cv2.destroyAllWindows()
 
 
+def run_camera_preflight(config: CaptureConfig) -> None:
+    """Open both configured cameras and run the A+B landmark readiness gate."""
+
+    by_role = {camera.role: camera for camera in config.cameras}
+    try:
+        with ExitStack() as stack:
+            webcam_source = stack.enter_context(
+                CameraSource(by_role["webcam_front"])
+            )
+            phone_source = stack.enter_context(CameraSource(by_role["iphone_left"]))
+            _run_camera_preflight(config, webcam_source, phone_source)
+    finally:
+        cv2.destroyAllWindows()
+
+
 def _simulation_frame(width: int, height: int, role: str, pair_index: int) -> np.ndarray:
     color = (40, 80, 140) if role == "webcam_front" else (120, 70, 35)
     frame = np.full((height, width, 3), color, dtype=np.uint8)
@@ -441,7 +526,12 @@ def run_simulation_protocols(
     webcam_recorder, phone_recorder = _collection_recorders(config, paths, simulation.fps)
     label_path = paths.labels_directory / "labels.csv"
     labels = PairedLabelWriter(label_path)
-    frame_samples = FrameSampleWriter(paths, config.frame_capture, config.display)
+    frame_samples = FrameSampleWriter(
+        paths,
+        config.frame_capture,
+        config.display,
+        enable_mediapipe_quality=False,
+    )
     try:
         for plan in plans:
             write_protocol_events(paths.events_directory / (plan.protocol_id + ".csv"), plan)

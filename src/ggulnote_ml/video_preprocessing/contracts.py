@@ -10,7 +10,6 @@ VIDEO_FEATURE_SCHEMA_VERSION = "video_mediapipe_2d_v1"
 DUAL_VIEW_MANIFEST_COLUMNS = (
     "sample_id",
     "subject_id",
-    "session_id",
     "view",
     "image_path",
     "pair_id",
@@ -70,7 +69,6 @@ PROCESSED_FEATURE_COLUMNS = (
     "y_norm",
     "sync_valid",
     "usable",
-    "training",
     "face_detected",
     "iris_detected",
     "landmark_count",
@@ -84,6 +82,33 @@ PROCESSED_FEATURE_COLUMNS = (
     *VIDEO_FEATURE_NAMES,
     "image_path",
 )
+
+
+@dataclass(frozen=True)
+class SelectedSample:
+    """One quality-selected capture sample produced for a confirmed dot."""
+
+    sample: str
+    participant: str
+    protocol: str
+    split: str
+    source_pair: int
+    webcam_frame: int
+    phonecam_frame: int
+    webcam_timestamp: int
+    phonecam_timestamp: int
+    segment: str
+    target: str
+    direction: str
+
+    @property
+    def export_partition(self) -> Optional[str]:
+        split = self.split.strip().lower()
+        if split == "evaluation":
+            return "evaluation"
+        if split in {"train", "training"}:
+            return "training"
+        return None
 
 
 @dataclass(frozen=True)
@@ -102,8 +127,10 @@ class SynchronizedPair:
     y_norm: Optional[float]
     protocol: str
     split: str
+    segment: str
+    target: str
+    direction: str
     usable: bool
-    training: bool
     valid: bool
     invalid_reason: str
 
@@ -135,8 +162,17 @@ class SynchronizedPair:
             return None
         if not self.target_available:
             return None
-        if self.split.strip().lower() == "evaluation":
+        split = self.split.strip().lower()
+        if split == "evaluation":
             return "evaluation"
-        if self.training:
+        if split in {"train", "training"}:
             return "training"
         return None
+
+
+@dataclass(frozen=True)
+class SelectedSynchronizedPair:
+    """A capture sample mapped to one valid latency-synchronized frame pair."""
+
+    sample: SelectedSample
+    synchronized: SynchronizedPair
