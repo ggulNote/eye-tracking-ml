@@ -61,11 +61,6 @@ def _parser() -> argparse.ArgumentParser:
         default=project_root / "configs/profiles/blazegaze.yaml",
     )
     parser.add_argument(
-        "--dual-profile",
-        type=Path,
-        default=project_root / "configs/profiles/dual_view_images.yaml",
-    )
-    parser.add_argument(
         "--side-one-eye-profile",
         type=Path,
         default=project_root / "configs/profiles/side_one_eye.yaml",
@@ -414,7 +409,7 @@ def main() -> int:
             "side",
             _config(
                 args.config,
-                (args.dual_profile, args.side_one_eye_profile),
+                (args.side_one_eye_profile,),
                 environment,
             ),
         ),
@@ -423,7 +418,7 @@ def main() -> int:
             "side",
             _config(
                 args.config,
-                (args.dual_profile, args.side_full_face_profile),
+                (args.side_full_face_profile,),
                 environment,
             ),
         ),

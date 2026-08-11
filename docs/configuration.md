@@ -55,7 +55,7 @@ x_norm = x_screen_px / screen_width_px  - 0.5
 y_norm = y_screen_px / screen_height_px - 0.5
 ```
 
-중요한 점은 분모가 **카메라 이미지 크기**가 아니라 participant calibration에 있는 **화면 크기**라는 것입니다. 예를 들어 p01의 화면은 1440×900이고 입력 사진은 주로 1280×720이므로 두 값을 바꾸어 쓰면 label 자체가 틀립니다.
+중요한 점은 분모가 **카메라 이미지 크기**가 아니라 manifest의 **화면 크기**라는 것입니다. 두 값을 바꾸어 쓰면 label 자체가 틀립니다.
 
 config는 `normalization_denominator: screen_size`를 사용합니다. 실제 pixel index가 `0 ... W-1`이므로 위 수식의 실제 범위는 정확히 `[-0.5, 0.5)`입니다. 문서와 config의 `target_range: [-0.5, 0.5]`는 모델 계약을 읽기 쉽게 나타낸 nominal bound입니다. 만약 `W-1`, `H-1`을 분모로 선택하면 양 끝이 정확히 `-0.5`, `0.5`가 되지만, 학습과 역변환에서 같은 규칙을 반드시 써야 합니다.
 
@@ -95,27 +95,23 @@ config는 `normalization_denominator: screen_size`를 사용합니다. 실제 pi
 - `mode: image`: sample 단위가 frame sequence가 아니라 정지 이미지 한 장임을 뜻합니다.
 - `dataset_root`: `paths.data_root`를 재사용합니다.
 - `image_extensions`: 허용할 파일 확장자입니다.
-- `reader.type`: dataset별 annotation parser registry 이름입니다.
-- `subject_glob`: `p00`부터 `p14` 같은 subject 디렉터리를 찾습니다.
-- `annotation_file_template`: subject ID로 annotation 파일 경로를 만듭니다.
-- `image_path_from_column`: 각 행의 어느 열을 subject 폴더 아래 상대 경로로 해석할지 정합니다.
-- `delimiter`, `has_header`: supplied `.txt`가 header 없는 whitespace 구분 형식임을 선언합니다.
-- `verify_image_exists`, `fail_on_bad_row`: 잘못된 row를 조용히 건너뛰지 않고 재현 가능한 실패로 만듭니다. 현재 reader는 strict mode만 구현했으므로 `fail_on_bad_row: true`만 지원하며 false는 명시적 unsupported error입니다.
-- `target_bounds_policy`: 화면 범위 밖 원본 label 처리 정책입니다. MPIIFaceGaze는 `keep_flagged`로 원값을 보존하고 manifest의 `target_in_screen_bounds=false`로 표시합니다. Generic manifest는 기본 `error`입니다. label을 clamp하거나 임의 수정하지 않습니다.
-- `columns`: 0-based 열 범위를 canonical field에 매핑합니다. 실제 28열 의미는 [`dataset-format.md`](dataset-format.md)에 정리했습니다.
-- `calibration`: camera, monitor pose, screen size `.mat` 경로입니다. 2D cm metric과 3D gaze vector에 필요합니다.
+- `reader.type: generic_csv`: 새 DB manifest reader를 선택합니다.
+- `manifest_path`: 이미지와 label을 연결한 CSV 경로입니다. 기본값은 `DUAL_VIEW_MANIFEST` 환경 변수에서 받습니다.
+- `verify_image_exists`, `verify_image_shape`: manifest의 이미지 경로와 실제 이미지 크기를 확인합니다.
+- `fail_on_bad_row`: 잘못된 row를 건너뛰지 않고 즉시 오류로 처리합니다.
+- `target_bounds_policy: error`: 화면 밖 label을 데이터 오류로 처리하며 clamp하지 않습니다.
+
+필수/선택 CSV 열은 [`dataset-format.md`](dataset-format.md)에 정리했습니다.
 
 ### `views`
 
-- `available`: 현재 dataset에 실제로 존재하는 branch만 적습니다. MPIIFaceGaze는 `[front]`입니다.
+- `available`: 현재 DB에 존재하는 branch입니다. 기본값은 `[front, side]`입니다.
 - `source_to_branch`: generic CSV의 `view` 값(예: `webcam`, `phonecam`)을 canonical `front` 또는 `side`로 실제 변환합니다. 이미 `front`/`side`인 값은 그대로 사용합니다.
-- `directory_to_branch`: 향후 `<subject>/webcam`, `<subject>/phonecam` 구조가 들어오면 각각 front/side에 매핑하는 규칙입니다. 폴더 이름 자체를 모델 코드에 hard-code하지 않습니다.
+- `directory_to_branch`: `<subject>/webcam`, `<subject>/phonecam` 구조를 각각 front/side에 매핑하는 보조 규칙입니다. 폴더 이름 자체를 모델 코드에 hard-code하지 않습니다.
 
 ### `pairing`
 
-MPIIFaceGaze의 한 행은 이미 한 이미지와 완전한 label을 구성하므로 `enabled: false`가 맞습니다. `day01/0005.jpg` 같은 파일 번호가 시간 순서를 암시하더라도 timestamp가 없고 frame이 빠져 있으므로 sequence나 pair로 추정하지 않습니다. annotation의 마지막 `left/right` 값도 camera view나 pair ID가 아닙니다.
-
-향후 dual-view dataset에서는 다음 규칙으로 켭니다.
+새 dual-view DB에서는 pairing을 기본으로 켜고 다음 규칙을 사용합니다.
 
 - `unit: image`: 두 정지 이미지를 한 fusion sample로 묶습니다.
 - `strategy: explicit_pair_id`: 수집 시 같은 gaze event에 부여한 ID로만 join합니다.
@@ -135,7 +131,7 @@ MPIIFaceGaze의 한 행은 이미 한 이미지와 완전한 label을 구성하�
 - `prevent_group_leakage`: overlap이 발견되면 즉시 실패합니다.
 - `manifest_dir`: 실제 배정 목록을 저장합니다. `reuse_existing_manifest`는 현재 `false`만 지원하며, true는 기존 manifest를 읽지 않고 새로 쓴 것처럼 진행하지 않고 unsupported error로 중단합니다.
 
-MPIIFaceGaze는 subject가 15명뿐이므로 70/15/15는 **sample 수가 아닌 목표 group 비율**이며 정수 인원 때문에 정확히 일치하지 않을 수 있습니다. 모든 positive-ratio split에 최소 한 group을 줄 수 없으면 빈 validation/test를 조용히 만들지 않고 실패합니다. 논문 비교가 목적이면 별도의 leave-one-person-out profile을 만드는 것이 더 적절합니다.
+70/15/15는 **sample 수가 아닌 목표 사람 비율**이며 정수 인원 때문에 정확히 일치하지 않을 수 있습니다. 모든 positive-ratio split에 최소 한 사람을 줄 수 없으면 빈 validation/test를 만들지 않고 실패합니다.
 
 ### `dataloader`
 
@@ -170,19 +166,16 @@ MPIIFaceGaze는 subject가 15명뿐이므로 70/15/15는 **sample 수가 아닌 
 아닙니다.
 
 `branch_overrides.front`와 `side`는 같은 stage의 `enabled`와 parameter를 view별로
-덮어씁니다. dual-view profile은 양쪽에서 `face_roi.mode=preserve_canvas`와
+덮어씁니다. 기본 dual-view 설정은 양쪽에서 `face_roi.mode=preserve_canvas`와
 `background_mask.method=face_roi_bbox`를 사용하여 원본 위치의 사각형 얼굴 ROI만 남기고,
 측면 ROI margin을 더 크게 둡니다. 타원형 `face_hull`은 선택 기능일 뿐 dual-view 기본값이
-아닙니다. supplied dataset에는 side view가 없으므로
-기준 config의 side override는 꺼져 있습니다.
-
-실측 p01 이미지 대부분은 1280×720이지만 일부는 320×240입니다. 따라서 image shape를 parser에 고정하지 않고 각 파일에서 읽으며, crop/resize 시 landmark에도 같은 좌표 변환을 적용해야 합니다.
+아닙니다. image shape는 parser에 고정하지 않고 각 파일에서 읽으며, crop/resize 시 landmark에도 같은 좌표 변환을 적용합니다.
 
 ### WebEyeTrack/BlazeGaze profile과의 차이
 
 기준 `config.yaml`의 224×224 full-face 입력은 **모델 교체가 가능한 generic contract
-예시**입니다. MPIIFaceGaze에서 보이는 `사각형 얼굴 + 검은 캔버스`는 source image이지
-BlazeGaze model input이 아닙니다. [`blazegaze.yaml`](../configs/profiles/blazegaze.yaml)은
+예시**입니다. source image 자체는 BlazeGaze model input이 아닙니다.
+[`blazegaze.yaml`](../configs/profiles/blazegaze.yaml)은
 다음 exact front 전처리를 선택합니다.
 
 ```text
@@ -366,7 +359,6 @@ eyelid-only included-angle scalar와 혼동하지 않습니다.
 ```bash
 python -m gaze_pipeline validate-config \
   --config configs/config.yaml \
-  --profile configs/profiles/dual_view_images.yaml \
   --profile configs/profiles/blazegaze.yaml \
   --profile configs/profiles/side_profile_90.yaml \
   --skip-path-checks \
@@ -380,7 +372,6 @@ paired front의 3D head vector를 선택하는 명령은 다음과 같습니다.
 ```bash
 python -m gaze_pipeline validate-config \
   --config configs/config.yaml \
-  --profile configs/profiles/dual_view_images.yaml \
   --profile configs/profiles/blazegaze.yaml \
   --profile configs/profiles/side_profile_90.yaml \
   --skip-path-checks \
@@ -540,7 +531,7 @@ pixel metric은 각각 screen width/height pixel을 곱해 같은 방식으로 �
 
 평균만 있으면 일부 큰 오류를 보기 어려워 percentile을 함께 남깁니다. fusion 성능은 반드시 각 branch 단독 결과와 비교합니다.
 
-`angular_error_deg`는 모델이 3D gaze direction을 예측할 때만 켭니다. MPIIFaceGaze의 정답 방향은 `normalize(gaze_target_3d - face_center_3d)`이며, screen `(x,y)` 회귀의 기본 metric으로 angular error를 섞지 않습니다.
+`angular_error_deg`는 새 DB에 `gaze_target_3d`와 `face_center_3d`가 있고 모델이 3D gaze direction을 예측할 때만 켭니다. screen `(x,y)` 회귀의 기본 metric으로 angular error를 섞지 않습니다.
 
 ## 10. Checkpoint 저장 위치와 `.pt` 대 `.pkl`
 

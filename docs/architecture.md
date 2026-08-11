@@ -10,7 +10,7 @@
 3. dataset/preprocessing/training/fusion/MLflow config
 ```
 
-현재 repository는 config validation, MPIIFaceGaze/generic reader, canonical manifest,
+현재 repository는 config validation, generic dual-view CSV reader, canonical manifest,
 subject-wise split, ordered preprocessing, PyTorch Dataset/DataLoader, MLflow preparation
 tracking까지 구현되어 있습니다. model adapter/registry, trainer, loss/metric executor,
 checkpoint와 late-fusion module은 다음 단계입니다.
@@ -39,9 +39,9 @@ flowchart LR
     E --> T["MLflow train metrics/models<br/>(미구현)"]
 ```
 
-MPIIFaceGaze 기준 현재 실행 경로는 front record의 준비와 전처리까지입니다. 실제 동시 촬영
-webcam/phonecam manifest에서는 pair validation과 paired Dataset까지 사용할 수 있습니다.
-front/side model 학습과 late fusion은 위 점선 이후의 향후 구현 범위입니다.
+새 webcam/phonecam manifest는 pair validation, paired Dataset과 Front/Side 전처리까지
+사용할 수 있습니다. front/side model 학습과 late fusion은 위 점선 이후의 향후 구현
+범위입니다.
 
 ## 3. Component 경계
 
@@ -59,7 +59,7 @@ front/side model 학습과 late fusion은 위 점선 이후의 향후 구현 범
 | Trainer/checkpoint | 미구현 | 위 component | optimized states와 `.pt` | epoch/validation/resume/export |
 | Training tracker | 미구현 | train/eval state | MLflow metrics/models | loss·metric·checkpoint 기록 |
 
-component는 canonical key로만 연결합니다. 예를 들어 dataset이 특정 모델의 positional argument 순서를 알거나, 모델이 MPIIFaceGaze 28개 열 번호를 직접 읽으면 경계를 위반한 것입니다.
+component는 canonical key로만 연결합니다. 예를 들어 dataset이 특정 모델의 positional argument 순서를 알거나, 모델이 source CSV 열을 직접 읽으면 경계를 위반한 것입니다.
 
 ## 4. Canonical 데이터 계약
 
@@ -212,11 +212,11 @@ decode → orientation → validation → visible-eye/profile annotation
 input**입니다.
 
 ```text
-MPIIFaceGaze source: 얼굴 사각형이 검은 캔버스에 놓인 이미지
-BlazeGaze input:     homography로 정렬한 128×512 양쪽 눈 strip
+새 DB source:    촬영한 webcam 정면 이미지
+BlazeGaze input: homography로 정렬한 128×512 양쪽 눈 strip
 ```
 
-즉 source가 이미 black canvas라고 해서 그 전체를 resize해 BlazeGaze에 넣지 않습니다.
+즉 source image 전체를 그대로 resize해 BlazeGaze에 넣지 않습니다.
 공식 front 전처리는 다음 순서를 사용합니다.
 
 1. MediaPipe Face Landmarker로 face/iris landmark와 `face_rt [4,4]`를 구합니다.
@@ -387,7 +387,7 @@ checkpoint, metric까지 추가해야 합니다. checkpoint 하나만 저장해�
 완료된 data pipeline은 다음과 같습니다.
 
 1. safe config load/merge/interpolation/validation
-2. MPIIFaceGaze 및 generic dual-view parser
+2. 기본 generic dual-view CSV parser
 3. canonical manifest, SHA-256, subject-wise split
 4. ordered front/side preprocessing executor
 5. single-view/paired Dataset과 config-driven DataLoader

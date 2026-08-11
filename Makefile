@@ -10,6 +10,7 @@ VENV_MLFLOW := $(VENV)/bin/mlflow
 CONFIG ?= $(PROJECT_ROOT)/configs/config.yaml
 PROFILE ?=
 PROFILES ?=
+DUAL_VIEW_MANIFEST ?= $(PROJECT_ROOT)/data/dual_view_manifest.csv
 GAZE_OUTPUT_ROOT ?= $(PROJECT_ROOT)/outputs
 MLFLOW_DB ?= $(PROJECT_ROOT)/mlflow.db
 MLFLOW_TRACKING_URI ?= sqlite:///$(MLFLOW_DB)
@@ -57,7 +58,7 @@ help:
 	@echo "  make clean-cache    Python/test/lint cache와 egg-info 제거"
 	@echo "  make check          config/unit/lint/format 전체 검사"
 	@echo
-	@echo "예: make prepare GAZE_DATA_ROOT='/absolute/MPIIFaceGaze'"
+	@echo "예: DUAL_VIEW_MANIFEST='/absolute/manifest.csv' make prepare GAZE_DATA_ROOT='/absolute/dual_view'"
 
 paths:
 	@echo "PROJECT_ROOT=$(PROJECT_ROOT)"
@@ -68,6 +69,7 @@ paths:
 	@echo "PROFILE=$(if $(strip $(PROFILE)),$(PROFILE),<none>)"
 	@echo "PROFILES=$(if $(strip $(PROFILES)),$(PROFILES),<none>)"
 	@echo "GAZE_DATA_ROOT=$(if $(strip $(GAZE_DATA_ROOT)),$(GAZE_DATA_ROOT),<not-set>)"
+	@echo "DUAL_VIEW_MANIFEST=$(DUAL_VIEW_MANIFEST)"
 	@echo "GAZE_OUTPUT_ROOT=$(GAZE_OUTPUT_ROOT)"
 	@echo "MLFLOW_DB=$(MLFLOW_DB)"
 	@echo "MLFLOW_TRACKING_URI=$(MLFLOW_TRACKING_URI)"
@@ -101,8 +103,9 @@ require-venv:
 	@if [[ ! -x "$(VENV_PYTHON)" ]]; then echo "가상환경이 없습니다: $(VENV)"; echo "먼저 make setup을 실행하세요."; exit 2; fi
 
 require-data:
-	@if [[ -z "$(strip $(GAZE_DATA_ROOT))" ]]; then echo "GAZE_DATA_ROOT가 필요합니다."; echo "예: make prepare GAZE_DATA_ROOT='/absolute/MPIIFaceGaze'"; exit 2; fi
+	@if [[ -z "$(strip $(GAZE_DATA_ROOT))" ]]; then echo "GAZE_DATA_ROOT가 필요합니다."; echo "예: DUAL_VIEW_MANIFEST='/absolute/manifest.csv' make prepare GAZE_DATA_ROOT='/absolute/dual_view'"; exit 2; fi
 	@if [[ ! -d "$(GAZE_DATA_ROOT)" ]]; then echo "데이터 폴더가 없습니다: $(GAZE_DATA_ROOT)"; exit 2; fi
+	@if [[ ! -f "$(DUAL_VIEW_MANIFEST)" ]]; then echo "DB manifest가 없습니다: $(DUAL_VIEW_MANIFEST)"; exit 2; fi
 
 check-setup: require-venv
 	@"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/check_environment.py"
@@ -112,10 +115,10 @@ validate-config: require-venv
 	@"$(VENV_PYTHON)" -m gaze_pipeline validate-config --config "$(CONFIG)" $(PROFILE_ARG) --skip-path-checks $(OVERRIDES)
 
 validate: require-venv require-data
-	@GAZE_DATA_ROOT="$(GAZE_DATA_ROOT)" GAZE_OUTPUT_ROOT="$(GAZE_OUTPUT_ROOT)" MLFLOW_TRACKING_URI="$(MLFLOW_TRACKING_URI)" "$(VENV_PYTHON)" -m gaze_pipeline validate-config --config "$(CONFIG)" $(PROFILE_ARG) $(OVERRIDES)
+	@GAZE_DATA_ROOT="$(GAZE_DATA_ROOT)" DUAL_VIEW_MANIFEST="$(DUAL_VIEW_MANIFEST)" GAZE_OUTPUT_ROOT="$(GAZE_OUTPUT_ROOT)" MLFLOW_TRACKING_URI="$(MLFLOW_TRACKING_URI)" "$(VENV_PYTHON)" -m gaze_pipeline validate-config --config "$(CONFIG)" $(PROFILE_ARG) $(OVERRIDES)
 
 prepare: require-venv require-data
-	@GAZE_DATA_ROOT="$(GAZE_DATA_ROOT)" GAZE_OUTPUT_ROOT="$(GAZE_OUTPUT_ROOT)" MLFLOW_TRACKING_URI="$(MLFLOW_TRACKING_URI)" "$(VENV_PYTHON)" -m gaze_pipeline prepare --config "$(CONFIG)" $(PROFILE_ARG) $(OVERRIDES)
+	@GAZE_DATA_ROOT="$(GAZE_DATA_ROOT)" DUAL_VIEW_MANIFEST="$(DUAL_VIEW_MANIFEST)" GAZE_OUTPUT_ROOT="$(GAZE_OUTPUT_ROOT)" MLFLOW_TRACKING_URI="$(MLFLOW_TRACKING_URI)" "$(VENV_PYTHON)" -m gaze_pipeline prepare --config "$(CONFIG)" $(PROFILE_ARG) $(OVERRIDES)
 
 mlflow-check: require-venv
 	@MLFLOW_TRACKING_URI="$(MLFLOW_TRACKING_URI)" "$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/check_mlflow.py" --require-db

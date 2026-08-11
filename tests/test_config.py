@@ -25,12 +25,17 @@ def test_base_config_resolves_environment_references_and_overrides(tmp_path: Pat
         environ={
             "GAZE_DATA_ROOT": str(tmp_path / "dataset"),
             "GAZE_OUTPUT_ROOT": str(tmp_path / "outputs"),
+            "DUAL_VIEW_MANIFEST": str(tmp_path / "manifest.csv"),
         },
         now=fixed_now,
         overrides=("data.dataloader.batch_size=16",),
     )
 
     assert config["data"]["dataset_root"] == str(tmp_path / "dataset")
+    assert config["data"]["reader"]["type"] == "generic_csv"
+    assert config["data"]["reader"]["manifest_path"] == str(tmp_path / "manifest.csv")
+    assert config["data"]["views"]["available"] == ["front", "side"]
+    assert config["data"]["pairing"]["enabled"] is True
     assert config["data"]["dataloader"]["batch_size"] == 16
     assert config["experiment"]["run_name"].endswith("20260807_123456")
     assert config["checkpoint"]["save_best"]["monitor"].endswith("subject_macro_euclidean_cm")
@@ -96,7 +101,10 @@ def test_each_split_ratio_must_be_between_zero_and_one(ratio: float) -> None:
 
 def test_fusion_requires_pairing_and_both_models() -> None:
     with pytest.raises(ConfigValidationError) as captured:
-        load_and_validate_config(BASE_CONFIG, overrides=("fusion.enabled=true",))
+        load_and_validate_config(
+            BASE_CONFIG,
+            overrides=("data.pairing.enabled=false", "fusion.enabled=true"),
+        )
 
     message = str(captured.value)
     assert "data.pairing.enabled" in message
@@ -105,7 +113,6 @@ def test_fusion_requires_pairing_and_both_models() -> None:
 
 def _dual_view_config() -> dict:
     config = load_and_validate_config(BASE_CONFIG)
-    config["data"]["views"]["available"].append("side")
     config["model"]["side"]["enabled"] = True
     config["preprocessing"]["branch_overrides"]["side"]["enabled"] = True
     return config
@@ -212,6 +219,7 @@ def test_front_3d_head_source_requires_pairing_and_resolves_front_key() -> None:
         "feature_extraction"
     ]["side_headpose"]
     head_feature["source"] = "front_3d"
+    config["data"]["pairing"]["enabled"] = False
 
     with pytest.raises(ConfigValidationError, match=r"data\.pairing\.enabled=true"):
         validate_config(config)

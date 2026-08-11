@@ -1,16 +1,14 @@
-# Manual demonstration annotations for the 3x3 strict-profile pose grid.
-# Filename: side_<head level>_<eye level>.jpeg.
+# 3x3 측면 자세 예시를 위한 수동 annotation입니다.
+# 파일명 형식은 side_<머리 단계>_<눈 단계>.jpeg입니다.
 #
-# Coordinates are source-image pixels (+x right, +y down). H0 is a
-# tragion-like ear anchor and H1 is the nose tip. Their unit vector is only a
-# projected 2D head-direction/pitch proxy, not calibrated 3D head pose.
+# 좌표는 원본 이미지 픽셀이며 +x는 오른쪽, +y는 아래입니다.
+# H0는 귀 근처 기준점, H1은 코끝입니다. 두 점의 단위 벡터는
+# 이미지 평면의 2D 머리 방향 보조값이며 보정된 3D head pose가 아닙니다.
 #
-# The six eyelid points use:
-#   [p1 nasal corner, p2 upper nasal, p3 upper temporal,
-#    p4 temporal corner, p5 lower temporal, p6 lower nasal]
-# Therefore a0=p4/index3, a1=p3/index2, a2=p5/index4.
-# These coordinates are for visualization and must be independently reviewed
-# before training or evaluation.
+# 눈꺼풀 6점 순서:
+#   [p1 눈앞머리, p2·p3 위 눈꺼풀, p4 눈꼬리, p5·p6 아래 눈꺼풀]
+# 따라서 a0=p4/index3, a1=p3/index2, a2=p5/index4입니다.
+# 아래 좌표는 시각화 예시이며 학습 전 별도로 검수해야 합니다.
 
 schema_version: 1
 coordinate_system:

@@ -31,7 +31,7 @@ experiment/<name> 실험용 config/profile
 커밋은 한 가지 논리 변경만 포함하고 명령형 제목을 사용합니다.
 
 ```text
-feat: add MPIIFaceGaze manifest reader
+feat: add dual-view CSV manifest field
 fix: prevent subject leakage in grouped split
 docs: explain BlazeGaze input contract
 test: add checkpoint round-trip test
@@ -85,7 +85,7 @@ ruff format .
 
 crop, resize, flip처럼 공간 좌표를 바꾸는 전처리는 image뿐 아니라 landmark와 gaze 관련 좌표도 같은 convention에 맞춰 처리해야 합니다.
 
-MPIIFaceGaze는 이미 얼굴 밖이 검은 image이므로 `background_mask`를 기본으로 다시 적용하지 않습니다.
+새 source image의 배경 형태를 가정하지 않습니다. 모델이 요구하는 ROI, mask와 normalization은 branch profile에 명시하고 테스트합니다.
 
 ## 새로운 모델과 adapter 추가
 

@@ -1,7 +1,5 @@
-# Side-phone profile that keeps the full profile face as the visual representation.
-# For paired custom data, also merge configs/profiles/dual_view_images.yaml.
-# Status: preprocessing and the input contract are implemented.
-# Planned: WebEyeTrack weight importing, model training, and evaluation.
+# 측면 얼굴 전체를 입력으로 사용하는 실험용 설정입니다.
+# 전처리와 입력 계약은 구현되어 있고 weight 변환, 학습과 평가는 아직 없습니다.
 
 experiment:
   name: dual_view_side_full_face_experimental
@@ -71,9 +69,9 @@ preprocessing:
         enabled: true
         source: landmarks_bbox
         mode: crop
-        # Extra context around the landmark bounding box.
+        # landmark box 주변에 추가할 얼굴 여백입니다.
         margin_ratio: 0.30
-        # Keep batch shape stable; invalid samples become black and are loss-masked.
+        # 실패 sample은 검은 이미지로 유지하고 loss 대상에서 제외합니다.
         on_failure: mark_invalid
       background_mask:
         enabled: false
@@ -97,7 +95,7 @@ model:
       webeyetrack_encoder_transfer:
         path: "${oc.env:WEBEYETRACK_WEIGHTS,./models/blazegaze_mpiifacegaze.keras}"
         source_framework: tensorflow_keras
-        # Set this when the TensorFlow-to-PyTorch importer is implemented.
+        # TensorFlow weight 변환기를 구현한 뒤 지정합니다.
         importer_entrypoint: null
         load_scope: convolutional_encoder_only
         reinitialize_shape_dependent_layers: true

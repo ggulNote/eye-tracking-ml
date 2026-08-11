@@ -1,10 +1,8 @@
-# Manual annotation example for strict 90-degree profile images.
+# 90도 측면 이미지의 수동 annotation 예시입니다.
 #
-# Coordinates are source-image pixels with origin at the top-left (+x right,
-# +y down).  This file is intentionally annotation-first: MediaPipe's 478-point
-# face detector does not reliably detect these strict-profile examples.
-# Re-label every training image with an annotation tool; these hand-placed
-# points are a demonstrative example, not production ground truth.
+# 좌표 원점은 원본 이미지의 왼쪽 위이며 +x는 오른쪽, +y는 아래입니다.
+# 90도 측면에서는 MediaPipe 검출이 불안정할 수 있어 annotation을 우선 사용합니다.
+# 아래 좌표는 설명용 예시이므로 실제 학습 이미지는 annotation 도구로 다시 지정해야 합니다.
 
 schema_version: 1
 coordinate_system:
@@ -20,34 +18,32 @@ images:
     view: side_profile_90
     eye_annotation_valid: true
 
-    # Covers the visible profile face. This ROI is useful for a separate
-    # profile-face/head-pose branch; the 128x256 eye model uses the eye ROI below.
+    # 보이는 측면 얼굴 전체의 ROI이며 한쪽 눈 모델은 아래 eye ROI를 사용합니다.
     face_bbox_xyxy: [1400, 990, 3260, 2990]
 
-    # A 2:1 crop around the only visible eye, including both eyelids and corners.
-    # Anatomical subject side (CanonicalRecord accepts left/right).
+    # 보이는 한쪽 눈의 위·아래 눈꺼풀과 양쪽 끝을 포함하는 2:1 crop입니다.
+    # visible_eye는 사람 기준 해부학적 좌우를 사용합니다.
     visible_eye: right
     visible_eye_bbox_xyxy: [1420, 1490, 1920, 1730]
 
-    # Required order for EAR:
-    # p1 corner, p2 upper-1, p3 upper-2, p4 opposite corner,
-    # p5 lower-2, p6 lower-1.
+    # EAR 계산 순서: p1 눈앞머리, p2·p3 위 눈꺼풀, p4 눈꼬리,
+    # p5·p6 아래 눈꺼풀입니다.
     visible_eye_keypoints_xy:
-      - [1595, 1615]  # p1
-      - [1633, 1570]  # p2
-      - [1695, 1580]  # p3
-      - [1760, 1625]  # p4
-      - [1705, 1660]  # p5
-      - [1640, 1662]  # p6
+      - [1595, 1615]  # 점 p1
+      - [1633, 1570]  # 점 p2
+      - [1695, 1580]  # 점 p3
+      - [1760, 1625]  # 점 p4
+      - [1705, 1660]  # 점 p5
+      - [1640, 1662]  # 점 p6
     iris_center_xy: [1640, 1635]
 
-    # 2D profile head direction: an ear-near anchor toward the nose tip.
-    # This is an image-plane cue, not a calibrated 3D head rotation.
+    # 귀 근처 기준점에서 코끝으로 향하는 2D 머리 방향입니다.
+    # 보정된 3D 회전값이 아니라 이미지 평면의 보조값입니다.
     profile_head_origin_xy: [2850, 1700]
     profile_head_forward_xy: [1460, 2150]
 
-    # No screen target was recorded for this demonstration image. Therefore the
-    # plotted iris/eyelid vector is an eye vertical cue, NOT calibrated gaze.
+    # 이 예시에는 화면 시선 label이 없으므로 iris 값은 수직 보조값일 뿐
+    # 보정된 시선 정답이 아닙니다.
     target_gaze_xy: null
     annotation_status: manual_example_only
 

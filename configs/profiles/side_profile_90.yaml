@@ -1,11 +1,9 @@
-# Strict 90-degree phone-camera profile using annotation-first visible-eye geometry.
-# Merge after dual_view_images.yaml and blazegaze.yaml. Unlike the front branch, this
-# profile intentionally does not require MediaPipe's 478-point face mesh.
-# Implemented: annotation-first eye ROI and selectable feature tensors.
-# Not implemented: weight importer, SideModel forward, training, and evaluation.
+# 90도 phonecam 이미지용 annotation 기반 측면 전처리 설정입니다.
+# config.yaml과 blazegaze.yaml 다음에 적용합니다.
+# 눈 ROI와 선택 feature 추출은 구현되어 있고 모델 실행과 학습은 아직 없습니다.
 
 experiment:
-  # Separate output/MLflow group for the strict-profile pipeline.
+  # 90도 측면 실험을 구분하는 MLflow 이름입니다.
   name: dual_view_profile90
   description: "Exact front BlazeGaze input plus strict-profile one-eye side input"
   tags:
@@ -22,9 +20,8 @@ preprocessing:
       enabled: true
       representation: profile90_selectable_features_v3
 
-      # A true profile may expose only one eye, so the frontal 478-point mesh is
-      # not a prerequisite. Eye/head annotations may later come from a dedicated
-      # profile detector, but their canonical keys remain identical.
+      # 90도 측면은 한쪽 눈만 보이므로 정면용 478개 face mesh를 요구하지 않습니다.
+      # 눈과 머리 위치는 manifest annotation에서 읽습니다.
       face_landmarks:
         enabled: false
       eye_selection:
@@ -35,60 +32,55 @@ preprocessing:
         enabled: false
 
       eye_region_warp:
-        # This stage always emits side_image; feature flags below affect auxiliaries only.
+        # 이 단계는 feature 선택과 관계없이 side_image를 항상 생성합니다.
         enabled: true
         method: profile90_annotation
-        # Final visible-eye tensor [height,width].
+        # 최종 한쪽 눈 tensor의 [높이, 너비]입니다.
         size_hw: [128, 256]
-        # Metadata keys expected from each strict-profile annotation row.
+        # 각 측면 annotation row에서 읽을 key입니다.
         bbox_key: visible_eye_bbox_xyxy
         eyelid_keypoints_key: visible_eye_keypoints_xy
         iris_center_key: iris_center_xy
         head_origin_key: profile_head_origin_xy
         head_forward_key: profile_head_forward_xy
-        # Six eyelid points define a roll-aligned 2:1 crop. If only a bbox is
-        # available, the bbox scale is used instead and EAR cannot be computed.
+        # 눈꺼풀 6점으로 기울기를 보정한 2:1 crop을 만듭니다.
+        # bbox만 있으면 EAR을 계산할 수 없습니다.
         crop_mode: affine
-        # Eye-width/eye-opening multipliers used to size the affine crop.
+        # 눈 너비와 눈 뜬 높이에 곱할 crop 여백 비율입니다.
         landmark_crop_scale_xy: [2.4, 1.2]
-        # This is an initial side-view threshold and must be calibrated on the
-        # phone-camera validation split instead of assumed equal to front EAR.
+        # 측면용 초기 EAR 기준이며 새 DB의 validation split으로 보정해야 합니다.
         ear_threshold: 0.20
-        # a0=p4 temporal corner, a1=p3 upper neighbor, a2=p5 lower neighbor.
+        # a0=p4 눈꼬리, a1=p3 위쪽 점, a2=p5 아래쪽 점입니다.
         eyelid_tail_indices: [3, 2, 4]
-        # These toggles select auxiliary features only. The eye ROI above is
-        # always produced as side_image regardless of all three values.
+        # 아래 값은 보조 feature만 선택하며 side_image 생성에는 영향을 주지 않습니다.
         feature_extraction:
           side_headpose:
-            # true appends one head feature tensor to the SideModel input.
+            # true이면 머리 방향 feature를 Side 모델 입력에 추가합니다.
             enabled: true
-            # side_2d: use ear/tragion -> nose image-plane unit vector.
-            # front_3d: use paired front_head_vector; pairing and the front
-            # metric-head-pose stage must both be enabled.
+            # side_2d는 귀 근처 기준점에서 코끝으로 향하는 2D 단위 벡터입니다.
+            # front_3d는 짝지어진 정면 이미지의 3D 머리 방향을 사용합니다.
             source: side_2d
             side_2d_key: side_head_pose_2d
             front_3d_key: front_head_vector
-            # Paired front orientation must be valid before it can replace side_2d.
+            # front_3d를 쓰려면 짝지어진 정면 머리 방향이 유효해야 합니다.
             front_3d_validity_key: front_head_orientation_valid
             front_3d_coordinate_frame: front_camera
-            # Invalid/missing front orientation is replaced with a finite zero
-            # vector before forward and excluded through side_gaze_valid.
+            # 정면 방향이 없거나 무효면 0으로 채우고 학습 대상에서 제외합니다.
             front_3d_invalid_policy: zero_fill_and_mask
           side_eyeangle:
-            # true emits two normalized direction angles: a0->a1 and a0->a2.
+            # true이면 a0→a1과 a0→a2의 두 방향각을 생성합니다.
             enabled: true
             key: side_eye_angles
           side_eyelidangle:
-            # Despite the legacy toggle name, this feature is iris-relative pose.
+            # 이름은 유지하지만 실제 값은 iris의 상대 위치입니다.
             enabled: true
-            # User-facing toggle name retained; the canonical tensor name says
-            # explicitly that this feature is iris-based, not eyelid-only.
+            # canonical key로 iris 기반 feature임을 명확히 구분합니다.
             key: side_iris_pose_2d
-            vertical_only: true  # true zeroes the horizontal component and keeps vertical cue.
-        # Fallback bbox expansion [width,height] when six eyelid points are unavailable.
+            vertical_only: true  # true이면 가로 성분을 0으로 두고 세로 성분만 사용합니다.
+        # 눈꺼풀 6점이 없을 때 bbox에 적용할 [가로, 세로] 확대 비율입니다.
         bbox_scale_xy: [1.25, 1.50]
-        pad_rgb: [0, 0, 0]  # Fill affine regions outside the source image with black.
-        # Closed/failed samples remain finite black tensors but are validity-masked.
+        pad_rgb: [0, 0, 0]  # 원본 이미지 밖의 영역은 검은색으로 채웁니다.
+        # 감긴 눈과 실패 sample은 검은 tensor로 유지하고 유효성 mask를 끕니다.
         on_closed: mark_invalid
         on_failure: mark_invalid
 
@@ -99,7 +91,7 @@ preprocessing:
       resize:
         enabled: false
       normalize:
-        # uint8 RGB -> float32 CHW in [0,1].
+        # uint8 RGB 이미지를 [0,1] 범위의 float32 CHW로 변환합니다.
         enabled: true
         mode: zero_one
         output_dtype: float32
@@ -109,36 +101,34 @@ model:
   side:
     enabled: true
     initialization:
-      # [미구현] Transfer only shape-compatible convolutional encoder layers.
+      # [미구현] shape가 맞는 convolution encoder layer만 전이합니다.
       mode: webeyetrack_encoder_transfer
       source_framework: tensorflow_keras
       path: "${oc.env:WEBEYETRACK_WEIGHTS,./models/blazegaze_mpiifacegaze.keras}"
       load_scope: convolution_depthwise_batchnorm_encoder
-      # The official 512-D gaze MLP is incompatible with the 256-D one-eye
-      # embedding and is therefore always reinitialized.
+      # 공식 512차원 MLP는 256차원 한쪽 눈 embedding과 맞지 않아 다시 초기화합니다.
       reinitialize: [spatial_projection, gaze_mlp, gaze_output]
-      # package.module:callable hook for the future Keras-to-PyTorch importer.
+      # 향후 Keras weight 변환 함수를 package.module:callable 형식으로 지정합니다.
       importer_entrypoint: null
     compatibility:
-      # Reject weights/models declared for another preprocessing representation.
+      # 다른 전처리 형식용 모델이나 weight는 오류로 중단합니다.
       preprocessing_id: profile90_selectable_features_v3
       on_mismatch: error
     input_contract:
-      # resolve_model_forward_keys() always starts with side_image and appends
-      # only features whose enabled flag above is true.
+      # side_image 뒤에 활성화된 보조 feature만 자동으로 추가합니다.
       forward_keys: auto
-      # side_image is always present; optional keys follow feature_extraction.enabled.
+      # side_image는 항상 존재하고 나머지 key는 feature 설정에 따릅니다.
       image_key: side_image
       shape: [B, 3, 128, 256]
       dtype: float32
       color_order: RGB
       value_range: [0.0, 1.0]
       validity_key: side_gaze_valid
-      # Validity masks supervision/fusion but is not itself a neural-network input.
+      # 유효성 mask는 loss와 fusion에만 사용하며 신경망 입력에는 넣지 않습니다.
       validity_role: loss_metric_fusion_mask
       validity_passed_to_model: false
       auxiliary_keys:
-        # These entries document shapes/coordinates; toggles above select actual inputs.
+        # 아래 항목은 shape와 좌표계를 정의하고 실제 선택은 위의 feature 설정이 담당합니다.
         side_headpose:
           enabled_from: preprocessing.branch_overrides.side.eye_region_warp.feature_extraction.side_headpose.enabled
           source_from: preprocessing.branch_overrides.side.eye_region_warp.feature_extraction.side_headpose.source
@@ -170,7 +160,7 @@ model:
           meaning: iris_minus_eyelid_center_normalized_by_eye_width_and_opening
           vertical_only: true
       diagnostics:
-        # Diagnostics are logged/visualized and never passed to the model.
+        # 진단값은 기록과 시각화에만 사용하며 모델에는 전달하지 않습니다.
         ear:
           key: side_ear
           role: selected_eye_open_closed_quality
@@ -183,14 +173,14 @@ model:
           role: construct_and_visualize_two_eye_direction_angles
           passed_to_model: false
     output_contract:
-      # Planned SideModel output: normalized gaze [x,y] plus 256-D embedding.
+      # [미구현] Side 모델은 정규화 시선 [x,y]와 256차원 embedding을 반환합니다.
       gaze_key: gaze_xy
       gaze_shape: [B, 2]
       embedding_key: side_embedding
       embedding_shape: [B, 256]
 
 loss:
-  # [미구현] Side branch supervision uses only rows with side_gaze_valid=true.
+  # [미구현] side_gaze_valid가 true인 row만 Side 학습에 사용합니다.
   branch_auxiliary:
     enabled: true
     side_weight: 1.0

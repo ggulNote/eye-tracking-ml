@@ -1,56 +1,55 @@
-# Two synthetic images for a local data-pipeline and MLflow smoke test.
-# Use only with scripts/create_two_image_demo.py / make demo-two-images.
-# Scope: config -> manifest/split -> generic ROI preprocessing -> MLflow prepare run.
-# It does not test BlazeGaze/Profile90 geometry, model forward, or training.
+# 합성 이미지 2장으로 데이터 준비와 MLflow를 확인하는 설정입니다.
+# scripts/create_two_image_demo.py 또는 make demo-two-images에서만 사용합니다.
+# 모델 실행이나 학습은 검사하지 않습니다.
 
 experiment:
-  name: demo_two_images  # Separate MLflow experiment for the synthetic smoke test.
+  name: demo_two_images  # 실제 실험과 분리된 MLflow 이름입니다.
   description: "Two-image synthetic smoke test; not a training benchmark"
   tags:
     dataset: synthetic_two_image_demo
     purpose: smoke_test
 
 data:
-  dataset_name: synthetic_two_image_demo  # Human-readable dataset lineage name.
+  dataset_name: synthetic_two_image_demo  # 합성 데이터의 구분 이름입니다.
   reader:
     type: generic_csv
-    manifest_path: "${oc.env:DEMO_MANIFEST,./.demo/two_images/manifest.csv}"  # Generated CSV.
-    verify_image_exists: true    # Confirm both generated PNG paths.
-    verify_image_shape: true     # Store their 640x360 dimensions.
-    target_bounds_policy: error  # Demo targets must be inside the screen.
+    manifest_path: "${oc.env:DEMO_MANIFEST,./.demo/two_images/manifest.csv}"  # 생성된 CSV 경로입니다.
+    verify_image_exists: true    # 생성된 PNG 파일의 존재 여부를 확인합니다.
+    verify_image_shape: true     # 이미지 크기도 함께 확인합니다.
+    target_bounds_policy: error  # 화면 밖 label은 오류로 처리합니다.
   views:
-    available: [front]
+    # 기본 view 매핑은 유지하지만 생성되는 demo row는 정면 두 장뿐입니다.
+    available: [front, side]
   pairing:
-    enabled: false  # The demo checks front-only preparation, not fusion.
+    enabled: false  # demo는 정면 데이터 준비만 검사합니다.
   split:
-    # Two subject groups populate train and validation; test is intentionally empty.
-    # Ratios operate on subject groups and must sum to 1.0.
+    # 두 사람을 train과 validation에 한 명씩 배정하고 test는 비웁니다.
     ratios:
       train: 0.50
       validation: 0.50
       test: 0.0
   dataloader:
-    batch_size: 2          # Both demo rows fit in one batch.
-    num_workers: 0         # Portable smoke-test setting.
-    pin_memory: false      # CPU-only demo.
+    batch_size: 2          # 두 sample을 한 batch에 넣습니다.
+    num_workers: 0         # 환경에 상관없이 실행되도록 단일 process로 읽습니다.
+    pin_memory: false      # CPU demo에서는 고정 메모리를 사용하지 않습니다.
     persistent_workers: false
 
 preprocessing:
   face_landmarks:
-    enabled: true          # Use the six synthetic points stored in the CSV.
+    enabled: true          # CSV에 저장된 합성 landmark 6점을 사용합니다.
     source: annotation
-    on_failure: error      # Demo data must be fully valid.
+    on_failure: error      # demo 데이터가 잘못되면 즉시 중단합니다.
   face_roi:
-    enabled: true          # Crop the annotated synthetic face.
+    enabled: true          # annotation을 기준으로 얼굴을 자릅니다.
     source: landmarks_bbox
-    margin_ratio: 0.20      # Add 20% context around the landmark box.
-    # Preserve the full detected face instead of selecting an eye subregion.
+    margin_ratio: 0.20      # landmark box 주변에 20% 여백을 추가합니다.
+    # 눈만 선택하지 않고 검출된 얼굴 전체를 유지합니다.
     keep_full_face: true
     on_failure: error
   background_mask:
-    enabled: true          # Keep only the face hull on black.
+    enabled: true          # 얼굴 영역만 남기고 배경은 검게 채웁니다.
     method: face_hull
     fill_rgb: [0, 0, 0]
-    feather_px: 0           # Hard mask edge for deterministic pixel output.
+    feather_px: 0           # 항상 같은 결과를 위해 경계를 선명하게 유지합니다.
   augment:
-    enabled: false         # Smoke tests must be deterministic.
+    enabled: false         # smoke test는 항상 같은 결과가 나와야 합니다.
