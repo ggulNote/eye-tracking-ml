@@ -22,6 +22,9 @@ dev = [
 video = [
   "opencv-python-headless>=4.10,<5",
 ]
+landmarks = [
+  "mediapipe>=0.10,<0.11",
+]
 capture = [
   "imageio-ffmpeg>=0.6,<1",
   "opencv-python>=4.10,<5",
@@ -31,6 +34,7 @@ capture = [
 [project.scripts]
 ggulnote-ml = "ggulnote_ml.cli:main"
 ggulnote-capture = "ggulnote_ml.capture.cli:main"
+ggulnote-video-preprocess = "ggulnote_ml.video_preprocessing.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
