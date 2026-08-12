@@ -31,6 +31,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=0.20,
         help="Mark an eye closed when its EAR is below this value",
     )
+    parser.add_argument(
+        "--intrinsics-mode",
+        choices=("required", "off"),
+        default="required",
+        help="Require and apply per-camera Camera.mat, or explicitly disable correction",
+    )
     return parser.parse_args(argv)
 
 
@@ -41,6 +47,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         dataset_root=args.dataset_root,
         output_root=args.output_root,
         ear_threshold=args.ear_threshold,
+        intrinsics_mode=args.intrinsics_mode,
     )
     print("Training manifest: %s" % result.training_manifest)
     print("Evaluation manifest: %s" % result.evaluation_manifest)

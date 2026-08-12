@@ -65,6 +65,8 @@ class FrameCaptureConfig:
 @dataclass(frozen=True)
 class DatasetConfig:
     root_directory: Path
+    calibration_source_directory: Path
+    geometry_mode: str
     require_calibration_assets: bool
 
 
@@ -264,6 +266,25 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
     dataset_root = Path(str(_required(dataset_raw, "root_directory", "dataset")))
     if not dataset_root.is_absolute():
         dataset_root = project_root / dataset_root
+    calibration_source = Path(
+        str(_required(dataset_raw, "calibration_source_directory", "dataset"))
+    )
+    if not calibration_source.is_absolute():
+        calibration_source = project_root / calibration_source
+    geometry_mode = str(
+        _required(dataset_raw, "geometry_mode", "dataset")
+    ).strip().lower()
+    if geometry_mode not in {"fixed_rig_2d", "intrinsics_2d", "calibrated_3d"}:
+        raise ValueError(
+            "dataset.geometry_mode must be fixed_rig_2d, intrinsics_2d, or calibrated_3d."
+        )
+    require_calibration_assets = bool(
+        _required(dataset_raw, "require_calibration_assets", "dataset")
+    )
+    if geometry_mode in {"intrinsics_2d", "calibrated_3d"} and not require_calibration_assets:
+        raise ValueError(
+            "%s mode requires dataset.require_calibration_assets=true." % geometry_mode
+        )
 
     preview_raw = _mapping(raw, "preview")
     preview_duration_ms = float(
@@ -474,9 +495,9 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
         frame_capture=frame_capture,
         dataset=DatasetConfig(
             root_directory=dataset_root.resolve(),
-            require_calibration_assets=bool(
-                _required(dataset_raw, "require_calibration_assets", "dataset")
-            ),
+            calibration_source_directory=calibration_source.resolve(),
+            geometry_mode=geometry_mode,
+            require_calibration_assets=require_calibration_assets,
         ),
         display=DisplayConfig(
             window_name=str(_required(display_raw, "window_name", "display")),

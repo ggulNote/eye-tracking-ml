@@ -31,6 +31,9 @@ def test_capture_config_loads_required_camera_roles_and_protocols():
     assert config.frame_capture.samples_per_target == 1
     assert config.frame_capture.eye_open_weight > config.frame_capture.face_weight
     assert config.frame_capture.mediapipe_ready_weight == pytest.approx(1000.0)
+    assert config.dataset.geometry_mode == "intrinsics_2d"
+    assert config.dataset.require_calibration_assets
+    assert config.dataset.calibration_source_directory.name == "macbook_air_m5_13_iphone16"
 
 
 def test_capture_config_rejects_duplicate_device_indices(tmp_path):
@@ -41,4 +44,16 @@ def test_capture_config_rejects_duplicate_device_indices(tmp_path):
     config_path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
 
     with pytest.raises(ValueError, match="indices must be unique"):
+        load_capture_config(config_path)
+
+
+def test_capture_config_rejects_3d_mode_without_calibration_assets(tmp_path):
+    with Path("configs/capture.yaml").open(encoding="utf-8") as file:
+        raw = yaml.safe_load(file)
+    raw["dataset"]["geometry_mode"] = "calibrated_3d"
+    raw["dataset"]["require_calibration_assets"] = False
+    config_path = tmp_path / "capture.yaml"
+    config_path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="calibrated_3d mode requires"):
         load_capture_config(config_path)

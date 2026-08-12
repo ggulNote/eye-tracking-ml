@@ -14,7 +14,7 @@
 
 ```text
 p00/
-├── Calibration/
+├── Calibration/                         # latency는 사용, MAT 기하는 2D 모드에서 선택
 │   ├── screenSize.mat
 │   ├── stereoCalibration.mat          # 선택 사항
 │   ├── webcam/
@@ -81,11 +81,17 @@ make collect PARTICIPANT=p00 PROTOCOL=vertical_click_3col_6row
 make collect PARTICIPANT=p00 PROTOCOL=all
 ```
 
-아직 보정값 없이 카메라 배치와 저장만 시험할 때는 다음 override를 사용합니다. 이 결과는 학습 데이터로 사용하지 않습니다.
+기본 `intrinsics_2d` 모드는 장비 공통 폴더의 웹캠·폰캠 `Camera.mat`을 검사하고
+참가자 `Calibration/` 폴더에 복사합니다. 두 파일의 보정 영상 크기가 촬영 설정과
+다르면 수집 전에 실패합니다.
 
 ```bash
-make collect PARTICIPANT=p00 ALLOW_MISSING_CALIBRATION=1
+make collect PARTICIPANT=p00
 ```
+
+`fixed_rig_2d`는 명시적으로 렌즈 보정을 끄는 개발용 선택이고,
+`calibrated_3d`는 실제 `Camera.mat`과 `monitorPose.mat`이 모두 필요합니다. 측정하지
+않은 값을 가짜 MAT 파일로 채우지 않습니다.
 
 정적 학습·세로 왕복·평가 점에서는 회색 원이 줄어든 뒤 점을 계속 보면서 마우스 왼쪽 버튼을 한 번 클릭합니다. Space 또는 Enter도 같은 확정 입력으로 사용할 수 있습니다. 너무 이른 입력은 무시되며, 확정 뒤 초록 원이 보이는 0.65초 동안에도 점을 계속 봐야 합니다.
 
@@ -176,9 +182,13 @@ Haar 눈 검출은 특히 30–45° 측면 폰캠, 안경, 강한 반사에서 �
 
 ## MAT 보정 자산
 
+기본 `intrinsics_2d`에서는 카메라별 `Camera.mat`이 필수입니다. B 전처리가 원본
+프레임에 `cv2.undistort`를 적용한 후 PNG와 MediaPipe 8차원 특징을 생성합니다.
+`monitorPose.mat`은 3D 시선 벡터나 카메라–화면 좌표 변환을 구현할 때만 필요합니다.
+
 수집기는 실제 loader가 소비하는 다음 변수를 검사하고 결과를 `participant.json`에 기록합니다.
 
-- `Camera.mat`: `cameraMatrix`, `distCoeffs`, `retval`
+- `Camera.mat`: `cameraMatrix`, `distCoeffs`, `retval`, `image_width`, `image_height`
 - `monitorPose.mat`: `rvects`, `tvecs`
 - `screenSize.mat`: `width_pixel`, `height_pixel`, `width_mm`, `height_mm`
 - `stereoCalibration.mat`(선택): 두 카메라 내부 파라미터, `R_iphone_to_webcam`, `T_iphone_to_webcam`, stereo reprojection error

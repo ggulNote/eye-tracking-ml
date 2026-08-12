@@ -9,6 +9,10 @@ from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 
+from ggulnote_ml.capture.calibration_assets import (
+    CameraIntrinsics,
+    load_camera_intrinsics,
+)
 from ggulnote_ml.capture.dataset import normalize_participant_id
 from ggulnote_ml.exceptions import ContractError, OptionalDependencyError
 from ggulnote_ml.video_preprocessing.contracts import (
@@ -19,6 +23,7 @@ from ggulnote_ml.video_preprocessing.contracts import (
     VIDEO_FEATURE_NAMES,
     VIDEO_FEATURE_SCHEMA_VERSION,
 )
+from ggulnote_ml.video_preprocessing.camera_geometry import FrameUndistorter
 from ggulnote_ml.video_preprocessing.mediapipe_features import (
     VideoFrameFeatures,
     extract_video_frame_features,
@@ -123,11 +128,15 @@ def run_video_preprocessing(
     cv2_module: Any = None,
     landmark_extractor_factory: Any = None,
     ear_threshold: float = 0.20,
+    intrinsics_mode: str = "required",
 ) -> VideoPreprocessingResult:
     """Export frames and MediaPipe features from A's synchronized video pairs."""
 
     if not 0.0 < ear_threshold < 1.0:
         raise ValueError("ear_threshold must be in (0,1).")
+    intrinsics_mode = intrinsics_mode.strip().lower()
+    if intrinsics_mode not in {"required", "off"}:
+        raise ValueError("intrinsics_mode must be required or off.")
 
     participant = normalize_participant_id(participant_id)
     raw_root = dataset_root.expanduser().resolve()
@@ -197,6 +206,23 @@ def run_video_preprocessing(
             raise OptionalDependencyError(
                 "Video preprocessing requires: pip install -e '.[video]'."
             ) from exc
+    camera_intrinsics: Dict[str, Optional[CameraIntrinsics]] = {
+        "webcam": None,
+        "phonecam": None,
+    }
+    if intrinsics_mode == "required":
+        for camera in camera_intrinsics:
+            camera_intrinsics[camera] = load_camera_intrinsics(
+                participant_source / "Calibration" / camera / "Camera.mat"
+            )
+    undistorters = {
+        camera: (
+            FrameUndistorter(intrinsics, cv2_module)
+            if intrinsics is not None
+            else None
+        )
+        for camera, intrinsics in camera_intrinsics.items()
+    }
     if landmark_extractor_factory is None:
         landmark_extractor_factory = _default_landmark_extractor_factory
     (participant_output / "webcam").mkdir(parents=True, exist_ok=False)
@@ -228,6 +254,10 @@ def run_video_preprocessing(
             assert partition is not None
             webcam_frame = webcam_decoder.read(pair.webcam_frame)
             phonecam_frame = phonecam_decoder.read(pair.phonecam_frame)
+            if undistorters["webcam"] is not None:
+                webcam_frame = undistorters["webcam"].apply(webcam_frame)
+            if undistorters["phonecam"] is not None:
+                phonecam_frame = undistorters["phonecam"].apply(phonecam_frame)
             pair_id = "%s_%s" % (participant, selection.sample.sample)
             webcam_image_row = _write_view_image_and_row(
                 cv2_module,
@@ -265,6 +295,8 @@ def run_video_preprocessing(
                     "webcam",
                     webcam_result,
                     str(webcam_image_row["image_path"]),
+                    camera_intrinsics["webcam"],
+                    participant_source,
                 )
             )
             feature_rows["phonecam"].append(
@@ -274,6 +306,8 @@ def run_video_preprocessing(
                     "phonecam",
                     phonecam_result,
                     str(phonecam_image_row["image_path"]),
+                    camera_intrinsics["phonecam"],
+                    participant_source,
                 )
             )
 
@@ -307,6 +341,23 @@ def run_video_preprocessing(
         "selected_pairs": len(selected_pairs),
         "unselected_synchronized_pairs": len(pairs) - len(selected_pairs),
         "ear_threshold": ear_threshold,
+        "intrinsics_mode": intrinsics_mode,
+        "intrinsics": {
+            camera: (
+                {
+                    "applied": True,
+                    "camera_matrix_path": intrinsics.path.relative_to(
+                        participant_source
+                    ).as_posix(),
+                    "rms_error_px": intrinsics.rms_error_px,
+                    "image_width": intrinsics.image_width,
+                    "image_height": intrinsics.image_height,
+                }
+                if intrinsics is not None
+                else {"applied": False}
+            )
+            for camera, intrinsics in camera_intrinsics.items()
+        },
         "video_feature_schema_version": VIDEO_FEATURE_SCHEMA_VERSION,
         "video_feature_order": list(VIDEO_FEATURE_NAMES),
         "processed_feature_rows": len(all_feature_rows),
@@ -410,6 +461,8 @@ def _processed_feature_row(
     camera: str,
     features: VideoFrameFeatures,
     image_path: str,
+    intrinsics: Optional[CameraIntrinsics],
+    participant_source: Path,
 ) -> Dict[str, object]:
     if camera == "webcam":
         source_frame = pair.webcam_frame
@@ -446,6 +499,15 @@ def _processed_feature_row(
         "y_norm": "%.8f" % pair.y_norm,
         "sync_valid": int(pair.valid),
         "usable": int(pair.usable),
+        "intrinsics_applied": int(intrinsics is not None),
+        "intrinsics_rms_px": (
+            "" if intrinsics is None else "%.8f" % intrinsics.rms_error_px
+        ),
+        "camera_matrix_path": (
+            ""
+            if intrinsics is None
+            else intrinsics.path.relative_to(participant_source).as_posix()
+        ),
         "face_detected": int(features.face_detected),
         "iris_detected": int(features.iris_detected),
         "landmark_count": features.landmark_count,

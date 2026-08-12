@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-SCHEMA_VERSION = "dual_view_video_v1"
-VIDEO_FEATURE_SCHEMA_VERSION = "video_mediapipe_2d_v1"
+SCHEMA_VERSION = "dual_view_video_v2"
+VIDEO_FEATURE_SCHEMA_VERSION = "video_mediapipe_undistorted_2d_v2"
 
 DUAL_VIEW_MANIFEST_COLUMNS = (
     "sample_id",
@@ -69,6 +69,9 @@ PROCESSED_FEATURE_COLUMNS = (
     "y_norm",
     "sync_valid",
     "usable",
+    "intrinsics_applied",
+    "intrinsics_rms_px",
+    "camera_matrix_path",
     "face_detected",
     "iris_detected",
     "landmark_count",

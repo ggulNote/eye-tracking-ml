@@ -1,5 +1,9 @@
 dataset:
   root_directory: data/raw/participants
+  calibration_source_directory: data/calibration/setups/macbook_air_m5_13_iphone16
+  # intrinsics_2d는 실제 Camera.mat으로 렌즈 왜곡을 제거한 뒤 MediaPipe
+  # 영상 좌표에서 화면 좌표를 학습합니다. monitorPose.mat은 요구하지 않습니다.
+  geometry_mode: intrinsics_2d
   require_calibration_assets: true
 
 cameras:

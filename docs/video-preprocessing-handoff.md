@@ -30,6 +30,8 @@ feat/click-confirmed-dot-capture
 ```text
 data/raw/participants/p00/
 ├── participant.json
+├── Calibration/webcam/Camera.mat
+├── Calibration/phonecam/Camera.mat
 ├── labels/image_samples.csv
 ├── synchronized/synchronized_frames.csv
 ├── webcam/capture.mp4
@@ -68,7 +70,10 @@ ggulnote-video-preprocess \
 7. `right_iris_center_x`
 8. `right_iris_center_y`
 
-카메라 기하 보정은 적용하지 않는다. 이후 geometry 브랜치를 병합할 때 이 8개 원본 2D 좌표를 변환 입력으로 사용할 수 있다.
+기본 `intrinsics_2d` 모드는 카메라마다 실제 `Camera.mat`을 로드하고 프레임 크기가
+보정 당시 크기와 같은지 검증한다. 이후 `cv2.undistort`로 렌즈 왜곡을 제거한 같은
+크기의 프레임에서 PNG와 아래 8차원 특징을 만든다. `monitorPose.mat`은 사용하지
+않으므로 결과는 여전히 카메라별 정규화 2D 좌표다.
 
 좌우 EAR은 별도 `left_ear`, `right_ear` 열이다. 각 EAR이 threshold 미만인지 좌우 눈 감김 열에 기록하고, 두 눈이 모두 감긴 경우에만 `eye_closed=1` 및 `feature_valid=0`으로 처리한다. 따라서 phonecam 측면 영상에서 한쪽 눈만 보이거나 닫힌 것으로 추정되어도 다른 한쪽이 열려 있으면 8차원 계약을 유지한다. 다만 MediaPipe FaceMesh가 시작되려면 한쪽 눈 단독 crop이 아니라 얼굴 윤곽이 포함되어야 하며, 보이지 않는 쪽 좌표는 모델의 추정값이라는 점을 해석 시 고려해야 한다.
 
@@ -91,7 +96,7 @@ data/interim/dual_view/
     └── p00_summary.json
 ```
 
-카메라별 `processed_features.csv`에는 training과 evaluation을 모두 보존한다. 각 행은 참가자, 카메라, A의 sample/pair, 원본 frame 번호, 원본 timestamp, latency 보정 timestamp, target, 얼굴·홍채 검출 여부, EAR, 눈 감김, 8차원 특징과 무효 사유를 포함한다.
+카메라별 `processed_features.csv`에는 training과 evaluation을 모두 보존한다. 각 행은 참가자, 카메라, A의 sample/pair, 원본 frame 번호, 원본 timestamp, latency 보정 timestamp, target, 렌즈 보정 적용 여부와 RMS, 얼굴·홍채 검출 여부, EAR, 눈 감김, 8차원 특징과 무효 사유를 포함한다.
 
 `p00_video_training.csv`에는 다음 조건을 모두 만족한 pair의 두 카메라 행만 들어간다.
 

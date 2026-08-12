@@ -1,0 +1,37 @@
+setup:
+  # 현재 고정 장비: MacBook Air (13-inch, M5) + iPhone 16
+  id: macbook_air_m5_13_iphone16
+  output_directory: data/calibration/setups/macbook_air_m5_13_iphone16
+
+screen:
+  # dot test가 저장하는 좌표계입니다. 화면 종횡비(2560:1664)와 일치하도록
+  # 1920x1248 캔버스를 사용합니다.
+  width_pixel: 1920
+  height_pixel: 1248
+  # Apple 공식 2560x1664, 224 ppi 사양으로 계산했습니다.
+  width_mm: 290.286
+  height_mm: 188.686
+  verification_source: apple_official_224ppi
+
+checkerboard:
+  # OpenCV 내부 코너 9x6은 실제 흑백 사각형 10x7을 뜻합니다.
+  inner_corners_x: 9
+  inner_corners_y: 6
+  # SVG 원본/인쇄 기준 크기입니다. 화면에 표시하면 실제 크기가 달라지므로
+  # 촬영에서는 아래 카메라별 자 측정값을 사용합니다.
+  square_size_mm: 25.0
+  verification_source: unverified
+  camera_measurements:
+    webcam:
+      display_device: iphone_16
+      square_size_mm: 8.0
+      verification_source: manual_measurement
+    phonecam:
+      display_device: macbook_air_m5_13
+      square_size_mm: 16.0
+      verification_source: manual_measurement
+  page_width_mm: 297.0
+  page_height_mm: 210.0
+  required_captures: 20
+  minimum_captures: 12
+  max_rms_error_px: 1.0

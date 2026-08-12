@@ -102,10 +102,17 @@ A+B 전체 새 데이터 흐름은 같은 참가자 번호로 아래 순서를 �
 ```bash
 make check-cameras
 make measure-latency PARTICIPANT=p00
-make collect PARTICIPANT=p00 ALLOW_MISSING_CALIBRATION=1
+make collect PARTICIPANT=p00
 make sync-participant PARTICIPANT=p00
 make video-features PARTICIPANT=p00
 ```
+
+기본 `intrinsics_2d` 모드는 실제 웹캠·폰캠 `Camera.mat`을 참가자 폴더에 복사하고,
+B 전처리에서 OpenCV 렌즈 왜곡 보정 후 MediaPipe 좌표를 추출합니다.
+`monitorPose.mat`과 stereo 보정은 요구하지 않으며, 보정된 2D 영상 좌표에서 화면
+좌표를 직접 학습합니다.
+카메라 위치·줌·해상도가 바뀌면 같은 모델의 입력 분포가 달라지므로 다시 수집하거나
+별도의 장비 설정으로 관리해야 합니다.
 
 레이턴시 측정만 들어 있는 `p00/Calibration` 폴더는 이미 수집된 참가자로 세지지
 않으므로, 이어지는 수집에서도 `p00`을 그대로 사용할 수 있습니다.

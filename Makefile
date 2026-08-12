@@ -10,8 +10,12 @@ DATASET_ROOT ?=
 LATENCY_JSON ?=
 OUTPUT_ROOT ?=data/interim/dual_view
 EAR_THRESHOLD ?=0.20
+INTRINSICS_MODE ?=required
+GEOMETRY_CONFIG ?=configs/geometry_calibration.yaml
+CAMERA ?=
+AUTO_CAPTURE ?=
 
-.PHONY: setup setup-video setup-capture collect simulate suggest-participant list-cameras check-cameras measure-latency sync-participant video-features validate preprocess smoke train evaluate predict test check mlflow
+.PHONY: setup setup-video setup-capture collect simulate suggest-participant list-cameras check-cameras measure-latency sync-participant video-features geometry-board geometry-screen geometry-intrinsics geometry-inspect validate preprocess smoke train evaluate predict test check mlflow
 
 setup:
 	python3 -m venv .venv
@@ -44,6 +48,19 @@ list-cameras:
 check-cameras:
 	$(PYTHON) -m ggulnote_ml.capture --config configs/capture.yaml --check-cameras
 
+geometry-board:
+	$(PYTHON) -m ggulnote_ml.capture.geometry_cli --config $(GEOMETRY_CONFIG) generate-board
+
+geometry-screen:
+	$(PYTHON) -m ggulnote_ml.capture.geometry_cli --config $(GEOMETRY_CONFIG) write-screen
+
+geometry-intrinsics:
+	@test -n "$(CAMERA)" || (echo "CAMERA=webcam or CAMERA=phonecam is required" && exit 2)
+	$(PYTHON) -m ggulnote_ml.capture.geometry_cli --config $(GEOMETRY_CONFIG) capture-intrinsics --camera $(CAMERA) $(if $(AUTO_CAPTURE),--auto-capture,)
+
+geometry-inspect:
+	$(PYTHON) -m ggulnote_ml.capture.geometry_cli --config $(GEOMETRY_CONFIG) inspect
+
 measure-latency:
 	@test -n "$(PARTICIPANT)" || (echo "PARTICIPANT=p00 is required" && exit 2)
 	$(PYTHON) -m ggulnote_ml.synchronization --participant $(PARTICIPANT)
@@ -54,7 +71,7 @@ sync-participant:
 
 video-features:
 	@test -n "$(PARTICIPANT)" || (echo "PARTICIPANT=p00 is required" && exit 2)
-	$(PYTHON) -m ggulnote_ml.video_preprocessing --participant $(PARTICIPANT) --dataset-root data/raw/participants --output-root $(OUTPUT_ROOT) --ear-threshold $(EAR_THRESHOLD)
+	$(PYTHON) -m ggulnote_ml.video_preprocessing --participant $(PARTICIPANT) --dataset-root data/raw/participants --output-root $(OUTPUT_ROOT) --ear-threshold $(EAR_THRESHOLD) --intrinsics-mode $(INTRINSICS_MODE)
 
 validate:
 	$(PYTHON) -m ggulnote_ml validate-config --config $(CONFIG)

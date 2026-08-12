@@ -8,7 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
-from .calibration_assets import inspect_calibration_assets
+from .calibration_assets import (
+    FULL_CALIBRATION_ASSET_PATHS,
+    INTRINSICS_ASSET_PATHS,
+    copy_calibration_assets,
+    inspect_calibration_assets,
+    load_camera_intrinsics,
+)
 from .camera import probe_camera_indices
 from .collection import (
     run_camera_preflight,
@@ -80,24 +86,68 @@ def run_collection(args: argparse.Namespace) -> Path:
     config_path = Path(args.config).expanduser().resolve()
     config = _apply_dataset_override(load_capture_config(config_path), args.dataset_root)
     participant_id = _participant_from_args(args.participant, config.dataset.root_directory)
-    calibration_directory = (
-        config.dataset.root_directory.expanduser().resolve() / participant_id / "Calibration"
-    )
-    calibration = inspect_calibration_assets(calibration_directory)
+    calibration_source = config.dataset.calibration_source_directory
+    calibration = inspect_calibration_assets(calibration_source)
     calibration_override = bool(args.allow_missing_calibration and not args.simulate)
+    if config.dataset.geometry_mode == "intrinsics_2d":
+        calibration_ready = calibration["camera_intrinsics_valid"]
+    elif config.dataset.geometry_mode == "calibrated_3d":
+        calibration_ready = calibration["required_assets_valid"]
+    else:
+        calibration_ready = True
     if (
         config.dataset.require_calibration_assets
         and not args.simulate
         and not calibration_override
-        and not calibration["required_assets_valid"]
+        and not calibration_ready
     ):
         raise ValueError(
             "Required calibration assets are missing or invalid under %s. "
-            "Set dataset.require_calibration_assets=false only for collection tests."
-            % calibration_directory
+            "Use fixed_rig_2d only for deliberate collection without lens correction."
+            % calibration_source
         )
+    uses_calibration = config.dataset.geometry_mode != "fixed_rig_2d"
+    if not args.simulate and uses_calibration and calibration_ready:
+        camera_directories = {
+            "webcam_front": "webcam",
+            "iphone_left": "phonecam",
+        }
+        for camera in config.cameras:
+            directory = camera_directories[camera.role]
+            intrinsics = load_camera_intrinsics(
+                calibration_source / directory / "Camera.mat"
+            )
+            if (intrinsics.image_width, intrinsics.image_height) != (
+                camera.width,
+                camera.height,
+            ):
+                raise ValueError(
+                    "%s Camera.mat size %dx%d does not match capture size %dx%d."
+                    % (
+                        directory,
+                        intrinsics.image_width,
+                        intrinsics.image_height,
+                        camera.width,
+                        camera.height,
+                    )
+                )
 
     paths = create_participant_paths(config.dataset.root_directory, participant_id)
+    calibration_copied = bool(
+        not args.simulate and uses_calibration and calibration_ready
+    )
+    if calibration_copied:
+        calibration_paths = (
+            INTRINSICS_ASSET_PATHS
+            if config.dataset.geometry_mode == "intrinsics_2d"
+            else FULL_CALIBRATION_ASSET_PATHS
+        )
+        copy_calibration_assets(
+            calibration_source,
+            paths.calibration_directory,
+            calibration_paths,
+        )
+        calibration = inspect_calibration_assets(paths.calibration_directory)
 
     plans = select_protocols(build_protocol_plans(config.protocols), args.protocol or ["all"])
     participant_metadata = load_optional_metadata(args.participant_metadata)
@@ -152,6 +202,16 @@ def run_collection(args: argparse.Namespace) -> Path:
             ),
         },
         "participant_metadata": participant_metadata,
+        "geometry": {
+            "mode": config.dataset.geometry_mode,
+            "camera_intrinsics_available": bool(
+                calibration["camera_intrinsics_valid"]
+            ),
+            "calibration_copied_to_participant": calibration_copied,
+            "frame_undistortion_stage": "video_preprocessing",
+            "calibration_source": str(calibration_source),
+            "camera_position_must_remain_fixed": True,
+        },
         "calibration_assets": calibration,
         "missing_calibration_override": calibration_override,
         "config_snapshot": str(config_snapshot.relative_to(paths.participant_directory)),

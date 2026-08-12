@@ -195,6 +195,7 @@ schema_version,sample_id,participant,camera,pair_id,pair,
 source_frame,source_timestamp,corrected_timestamp,
 reference_timestamp,target_timestamp,protocol,collection_split,
 x_norm,y_norm,sync_valid,usable,
+intrinsics_applied,intrinsics_rms_px,camera_matrix_path,
 face_detected,iris_detected,landmark_count,
 left_ear,right_ear,left_eye_closed,right_eye_closed,eye_closed,
 feature_valid,invalid_reason,
@@ -205,7 +206,10 @@ right_iris_center_x,right_iris_center_y,
 image_path
 ```
 
-8차원 특징은 두 눈 중심과 두 홍채 중심의 정규화된 2D `(x,y)`입니다. `training` 열은 `collection_split`과 중복되므로 저장하지 않습니다.
+`intrinsics_applied=1`이면 `camera_matrix_path`의 `Camera.mat`으로 같은 해상도의 원본
+프레임을 OpenCV 왜곡 보정한 뒤 특징을 계산했다는 뜻입니다. `intrinsics_rms_px`는
+체커보드 내부 보정 RMS입니다. 8차원 특징은 보정된 프레임의 두 눈 중심과 두 홍채
+중심 정규화 2D `(x,y)`입니다. `training` 열은 `collection_split`과 중복되므로 저장하지 않습니다.
 
 ## 5. 학습 파이프라인 CSV 인터페이스
 

@@ -22,6 +22,7 @@ dev = [
 ]
 video = [
   "opencv-python-headless>=4.10,<4.12",
+  "scipy>=1.10,<2",
 ]
 landmarks = [
   # 0.10.21 is the last project-tested macOS universal2 wheel that exposes

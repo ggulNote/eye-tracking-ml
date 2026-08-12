@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.io import savemat
 
 from ggulnote_ml.capture.frame_samples import IMAGE_SAMPLE_COLUMNS
 from ggulnote_ml.exceptions import ContractError
@@ -45,6 +46,7 @@ class _FakeCapture:
 class _FakeCv2:
     def __init__(self, videos):
         self._videos = videos
+        self.undistort_calls = []
 
     def VideoCapture(self, path):
         return _FakeCapture(self._videos[Path(path).resolve()])
@@ -53,6 +55,12 @@ class _FakeCv2:
     def imwrite(path, frame):
         Path(path).write_bytes(frame.tobytes())
         return True
+
+    def undistort(self, frame, camera_matrix, distortion, _new_matrix, output_matrix):
+        self.undistort_calls.append(
+            (frame.shape, camera_matrix.copy(), distortion.copy(), output_matrix.copy())
+        )
+        return frame.copy()
 
 
 class _FakeLandmarkExtractor:
@@ -160,6 +168,21 @@ def _build_source_dataset(tmp_path):
     (participant / "webcam").mkdir()
     (participant / "phonecam").mkdir()
     (participant / "labels").mkdir()
+    for camera in ("webcam", "phonecam"):
+        calibration = participant / "Calibration" / camera
+        calibration.mkdir(parents=True)
+        savemat(
+            calibration / "Camera.mat",
+            {
+                "cameraMatrix": np.array(
+                    [[100.0, 0.0, 1.0], [0.0, 100.0, 0.5], [0.0, 0.0, 1.0]]
+                ),
+                "distCoeffs": np.zeros((1, 5)),
+                "retval": np.array([[0.2]]),
+                "image_width": np.array([[3]]),
+                "image_height": np.array([[2]]),
+            },
+        )
     (participant / "webcam" / "capture.mp4").write_bytes(b"webcam")
     (participant / "phonecam" / "capture.mp4").write_bytes(b"phonecam")
     (participant / "labels" / "labels.csv").write_text(
@@ -266,11 +289,12 @@ def test_video_preprocessing_exports_separate_main_compatible_manifests(tmp_path
     output_root = tmp_path / "interim" / "dual_view"
     original_sync = synchronized.read_bytes()
 
+    fake_cv2 = _fake_cv2(participant)
     result = run_video_preprocessing(
         "p00",
         dataset_root,
         output_root,
-        cv2_module=_fake_cv2(participant),
+        cv2_module=fake_cv2,
         landmark_extractor_factory=_landmark_extractor_factory(),
     )
 
@@ -315,6 +339,11 @@ def test_video_preprocessing_exports_separate_main_compatible_manifests(tmp_path
     assert {row["camera"] for row in video_training} == {"webcam", "phonecam"}
     assert {row["collection_split"] for row in video_training} == {"training"}
     assert {row["collection_split"] for row in video_evaluation} == {"evaluation"}
+    assert all(row["intrinsics_applied"] == "1" for row in video_training + video_evaluation)
+    assert {
+        row["camera_matrix_path"] for row in video_training + video_evaluation
+    } == {"Calibration/webcam/Camera.mat", "Calibration/phonecam/Camera.mat"}
+    assert len(fake_cv2.undistort_calls) == 4
     assert all("training" not in row for row in video_training + video_evaluation)
     missing_face = [row for row in video_evaluation if row["camera"] == "phonecam"]
     assert missing_face[0]["face_detected"] == "0"
@@ -332,6 +361,9 @@ def test_video_preprocessing_exports_separate_main_compatible_manifests(tmp_path
     assert summary["training_feature_pairs"] == 1
     assert summary["face_not_detected_rows"] == 1
     assert summary["video_feature_order"] == list(VIDEO_FEATURE_NAMES)
+    assert summary["intrinsics_mode"] == "required"
+    assert summary["intrinsics"]["webcam"]["applied"]
+    assert summary["intrinsics"]["phonecam"]["rms_error_px"] == pytest.approx(0.2)
     assert synchronized.read_bytes() == original_sync
     assert (participant / "labels" / "labels.csv").read_text(
         encoding="utf-8"
@@ -385,5 +417,18 @@ def test_video_preprocessing_refuses_output_inside_raw_dataset(tmp_path):
             "p00",
             dataset_root,
             dataset_root / "processed",
+            cv2_module=_fake_cv2(participant),
+        )
+
+
+def test_video_preprocessing_requires_camera_mat_by_default(tmp_path):
+    dataset_root, participant, _ = _build_source_dataset(tmp_path)
+    (participant / "Calibration" / "phonecam" / "Camera.mat").unlink()
+
+    with pytest.raises(FileNotFoundError, match="Camera calibration does not exist"):
+        run_video_preprocessing(
+            "p00",
+            dataset_root,
+            tmp_path / "interim" / "dual_view",
             cv2_module=_fake_cv2(participant),
         )
