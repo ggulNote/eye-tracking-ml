@@ -3,6 +3,8 @@
 새로 수집할 정면 `webcam`과 90도 측면 `phonecam` 정지 이미지로 시선 추정 모델을 학습·평가하는 config 기반 PyTorch 파이프라인입니다.
 
 현재 구현 범위는 **DB manifest 검증 → 사람 단위 split → Front/Side 전처리 → 외부 모델 adapter → 학습·평가 → Y축 residual fusion → checkpoint/MLflow 기록**입니다.
+MobileNetV4-Conv-S와 BlazeGaze transfer Side model factory 두 개 및 BlazeGaze encoder weight
+converter도 이 runtime의 `delta_y_side` contract에 연결할 수 있도록 구현되어 있습니다.
 
 ## 아키텍처
 
@@ -31,6 +33,9 @@ flowchart LR
 | 학습·평가 loop, loss·metric, best/last/final `.pt` | 구현 |
 | Front 고정 x + Side y-residual fusion | 구현 |
 | 공식 WebEyeTrack Front `.keras` 실행 | 구현 (`Keras 3` torch backend wrapper, SHA 검증) |
+| Side model factory: MobileNetV4-Conv-S, BlazeGaze transfer | 구현—runtime entrypoint 지원 |
+| Side model profile과 residual output contract | 구현—`delta_y_side [B,1]` |
+| BlazeGaze `.keras` encoder-only converter | 구현—TensorFlow는 변환 시에만 선택 사용 |
 
 ## 이번 업데이트의 핵심
 
@@ -351,6 +356,12 @@ side_image
 비활성화한 feature는 모델에 전달하지 않습니다. `side_ear`, `side_selected_eye_index` 같은
 diagnostic 값도 모델 입력이 아니며, validity 값은 loss·metric·fusion mask로 사용합니다.
 
+Side factory의 출력은 `delta_y_side [B,1]`, `side_embedding [B,256]`과 optional
+`quality [B,1]`입니다. `delta_y_side`는 Front y에 더하는 centered-normalized residual이며
+Side model은 독립적인 x 좌표를 출력하지 않습니다. 빠른 사용법은
+[Side model package README](src/gaze_pipeline/models/side/README.md), 상세 contract와 converter
+설명은 [Side Encoder 문서](docs/side-encoders.md)를 참고하세요.
+
 Side 이미지 ROI는 항상 생성되고 아래 feature만 config로 선택합니다.
 
 ```yaml
@@ -379,6 +390,7 @@ y_final = y_front + w_y * delta_y_side
 configs/config.yaml
   + configs/profiles/blazegaze.yaml
   + configs/profiles/side_profile_90.yaml
+  + configs/models/<selected-side-model>.yaml
   + CLI override
 ```
 
@@ -394,11 +406,16 @@ make validate-config OVERRIDES="data.dataloader.batch_size=16"
 | `configs/config.yaml` | 새 dual-view DB, split, 공통 전처리와 실행 설정 |
 | `configs/profiles/blazegaze.yaml` | Front 입력 전처리 계약 |
 | `configs/profiles/side_profile_90.yaml` | 90도 Side 한쪽 눈과 feature 설정 |
+| `configs/models/side_blazegaze_transfer.yaml` | BlazeGaze transfer factory override |
+| `configs/models/side_mobilenet_v4.yaml` | MobileNetV4 factory override |
 | `configs/profiles/side_one_eye.yaml` | landmark 기반 best-visible Side 눈 crop 실험 |
 | `configs/profiles/side_full_face.yaml` | Side 전체 얼굴 crop 실험 |
 | `configs/profiles/demo_two_images.yaml` | 합성 Front 데이터·MLflow smoke test |
 | `configs/profiles/demo_dual_view_training.yaml` | 합성 dual-view 전체 학습 smoke test |
 | `configs/profiles/data_ver1_smoke.yaml` | p00/p03 실제 DB의 read-only wiring smoke test |
+
+Model profile을 마지막에 적용하면 runtime이 선택한 entrypoint와 residual output contract로
+Side model을 생성합니다.
 
 ## 결과
 
@@ -422,4 +439,5 @@ checkpoint와 `evaluation/<split>/metrics`가 기록됩니다. prediction은
 `mlflow.log_predictions=true`일 때만 `subject_id`를 제거한 사본을
 `evaluation/<split>/predictions`에 올립니다. 원본 얼굴 이미지는 artifact로 올리지 않습니다.
 
-상세 내용은 [아키텍처](docs/architecture.md), [설정 설명](docs/configuration.md), [기여 가이드](CONTRIBUTING.md)를 참고하세요.
+상세 내용은 [Side Encoder](docs/side-encoders.md), [아키텍처](docs/architecture.md),
+[설정 설명](docs/configuration.md), [기여 가이드](CONTRIBUTING.md)를 참고하세요.

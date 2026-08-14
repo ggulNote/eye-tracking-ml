@@ -5,6 +5,7 @@
 torch==2.13.0
 torchvision==0.28.0
 torchmetrics==1.9.0
+timm==1.0.28
 # Official WebEyeTrack weights are a backend-neutral Keras v3 archive.
 # The pipeline loads them with KERAS_BACKEND=torch and fine-tunes them via PyTorch.
 keras==3.15.1
