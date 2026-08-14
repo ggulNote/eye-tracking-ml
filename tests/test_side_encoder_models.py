@@ -216,3 +216,17 @@ def test_mobilenet_config_uses_exact_offline_safe_timm_model() -> None:
         "image_std": [0.229, 0.224, 0.225],
         "dropout": 0.0,
     }
+
+
+def test_blazegaze_config_uses_random_init_transfer_factory() -> None:
+    config = _load_side_model_config(BLAZEGAZE_MODEL)
+    side = config["model"]["side"]
+
+    assert side["entrypoint"] == "gaze_pipeline.models.side.blazegaze_transfer:create_model"
+    assert side["init_args"] == {
+        "encoder_weights_path": None,
+        "image_feature_dim": 256,
+        "embedding_dim": 256,
+        "auxiliary_dim": 32,
+        "dropout": 0.0,
+    }
