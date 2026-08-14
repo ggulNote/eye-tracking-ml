@@ -1,4 +1,4 @@
-"""Command-line entry points available before the training runner exists."""
+"""Command-line entry points for validation, preparation, training, and evaluation."""
 
 from __future__ import annotations
 
@@ -23,9 +23,7 @@ class CommandError(RuntimeError):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m gaze_pipeline",
-        description=(
-            "Dual-view gaze pipeline의 config를 검사하고 데이터 manifest/split을 준비합니다."
-        ),
+        description=("Dual-view gaze pipeline의 데이터 준비, 학습, 평가를 config로 실행합니다."),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -55,6 +53,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_config_arguments(prepare_parser)
     prepare_parser.set_defaults(handler=_run_prepare)
+
+    train_parser = subparsers.add_parser(
+        "train",
+        help="manifest를 준비하고 외부/내장 PyTorch 모델을 학습합니다.",
+    )
+    _add_config_arguments(train_parser)
+    train_parser.set_defaults(handler=_run_train)
+
+    evaluate_parser = subparsers.add_parser(
+        "evaluate",
+        help="저장된 pipeline checkpoint로 validation/test를 평가합니다.",
+    )
+    _add_config_arguments(evaluate_parser)
+    evaluate_parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "평가할 .pt checkpoint. 생략하면 checkpoint.resume_from 또는 "
+            "checkpoint.save_best 경로를 사용합니다."
+        ),
+    )
+    evaluate_parser.add_argument(
+        "--split",
+        choices=("validation", "test"),
+        default="test",
+        help="평가할 split (기본값: test)",
+    )
+    evaluate_parser.set_defaults(handler=_run_evaluate)
     return parser
 
 
@@ -164,6 +191,85 @@ def _run_prepare(args: argparse.Namespace) -> int:
     if tracking_result is not None:
         print(f"  MLflow run_id: {tracking_result.run_id}")
     return 0
+
+
+def _run_train(args: argparse.Namespace) -> int:
+    config_path = args.config.expanduser()
+    config = _load_execution_config(args, config_path)
+    try:
+        from gaze_pipeline.training import TrainingError, train_pipeline
+
+        result = train_pipeline(config, config_path=config_path.resolve())
+    except ImportError as exc:
+        raise CommandError(
+            "학습 모듈을 불러오지 못했습니다. make setup으로 PyTorch 의존성을 설치하세요. "
+            f"원인: {exc}"
+        ) from exc
+    except TrainingError as exc:
+        raise CommandError(f"학습에 실패했습니다: {exc}") from exc
+    print("학습이 완료되었습니다.")
+    _print_pipeline_result(result)
+    return 0
+
+
+def _run_evaluate(args: argparse.Namespace) -> int:
+    config_path = args.config.expanduser()
+    config = _load_execution_config(args, config_path)
+    try:
+        from gaze_pipeline.training import TrainingError, evaluate_pipeline
+
+        result = evaluate_pipeline(
+            config,
+            checkpoint=args.checkpoint,
+            split=args.split,
+            config_path=config_path.resolve(),
+        )
+    except ImportError as exc:
+        raise CommandError(
+            "평가 모듈을 불러오지 못했습니다. make setup으로 PyTorch 의존성을 설치하세요. "
+            f"원인: {exc}"
+        ) from exc
+    except TrainingError as exc:
+        raise CommandError(f"평가에 실패했습니다: {exc}") from exc
+    print(f"{args.split} 평가가 완료되었습니다.")
+    _print_pipeline_result(result)
+    return 0
+
+
+def _load_execution_config(args: argparse.Namespace, config_path: Path) -> dict[str, Any]:
+    """Load paths for data/model execution while allowing built-in fallback models."""
+
+    return load_and_validate_config(
+        config_path,
+        profiles=args.profile,
+        overrides=args.overrides,
+        check_paths=True,
+        require_model_entrypoints=False,
+        base_dir=_project_base_dir(config_path),
+    )
+
+
+def _print_pipeline_result(result: Any) -> None:
+    for name in (
+        "checkpoint_path",
+        "last_checkpoint_path",
+        "model_path",
+        "metrics_path",
+        "predictions_path",
+    ):
+        value = getattr(result, name, None)
+        if value is not None:
+            print(f"  {name}: {value}")
+    best_epoch = getattr(result, "best_epoch", None)
+    if best_epoch is not None:
+        print(f"  best_epoch: {best_epoch}")
+    mlflow_run_id = getattr(result, "mlflow_run_id", None)
+    if mlflow_run_id is not None:
+        print(f"  MLflow run_id: {mlflow_run_id}")
+    metrics = getattr(result, "metrics", None)
+    if isinstance(metrics, Mapping):
+        for name, value in sorted(metrics.items()):
+            print(f"  metric {name}: {float(value):.6f}")
 
 
 def _print_prepare_result(result: Any) -> None:

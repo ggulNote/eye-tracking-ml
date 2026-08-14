@@ -1,6 +1,6 @@
-# 합성 이미지 2장으로 데이터 준비와 MLflow를 확인하는 설정입니다.
+# 합성 이미지 2장으로 데이터 준비·Front smoke 학습과 MLflow를 확인하는 설정입니다.
 # scripts/create_two_image_demo.py 또는 make demo-two-images에서만 사용합니다.
-# 모델 실행이나 학습은 검사하지 않습니다.
+# 실제 성능 평가는 아니며 test split은 생성하지 않습니다.
 
 experiment:
   name: demo_two_images  # 실제 실험과 분리된 MLflow 이름입니다.

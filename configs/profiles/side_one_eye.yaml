@@ -1,5 +1,5 @@
 # 가장 잘 보이는 한쪽 눈을 선택하는 실험용 측면 설정입니다.
-# 전처리와 입력 계약은 구현되어 있고 weight 변환, 학습과 평가는 아직 없습니다.
+# 전처리·generic PyTorch 학습은 구현되어 있고 Keras weight 변환은 지원하지 않습니다.
 
 experiment:
   name: dual_view_side_one_eye_experimental
@@ -89,6 +89,7 @@ model:
   side:
     enabled: true
     initialization:
+      # 실험 metadata입니다. generic runner는 이 namespace로 backbone/weight 전이를 실행하지 않습니다.
       # WebEyeTrack weight는 한쪽 눈 입력과 완전히 호환되지 않으므로 기본값은 새 backbone입니다.
       mode: custom_backbone
       allowed_modes: [custom_backbone, webeyetrack_encoder_transfer]
@@ -101,6 +102,7 @@ model:
         reinitialize_shape_dependent_layers: true
         allow_representation_shift: false
     compatibility:
+      # 설명용 metadata이며 generic runner가 preprocessing_id/on_mismatch를 자동 적용하지 않습니다.
       preprocessing_id: side_one_eye_v1
       on_mismatch: error
     input_contract:
@@ -126,8 +128,11 @@ model:
           dtype: int64
           encoding: left_0_right_1_both_2_invalid_minus_1
     output_contract:
-      gaze_key: gaze_xy
-      gaze_shape: [B, 2]
+      # Side는 Front y축의 residual 하나만 출력합니다.
+      gaze_key: null
+      gaze_shape: null
+      delta_y_key: delta_y_side
+      delta_y_shape: [B, 1]
       embedding_key: side_embedding
       embedding_shape: [B, D_side]
       uncertainty_key: null
@@ -137,3 +142,8 @@ loss:
     enabled: true
     side_weight: 1.0
     side_mask_key: side_gaze_valid
+
+fusion:
+  enabled: true
+  method: y_axis_residual
+  input_keys: [front.gaze_xy, side.delta_y_side]

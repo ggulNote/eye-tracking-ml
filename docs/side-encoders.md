@@ -1,9 +1,9 @@
 # Side Encoder 사용과 contract
 
 이 문서는 strict 90° Side 입력용 PyTorch model factory 두 개와 BlazeGaze encoder weight
-converter의 현재 사용법과 통합 경계를 설명합니다. 두 factory는 직접 import하여 실행할 수 있고
-model profile도 config validation을 통과하지만, profile의 entrypoint를 읽어 model을 자동 생성하는
-runtime loader/registry/adapter는 아직 없습니다.
+converter의 현재 사용법과 통합 경계를 설명합니다. 두 factory는 직접 import하여 실행할 수 있고,
+model profile을 마지막에 적용하면 runtime loader가 선택한 entrypoint와 `init_args`로 model을
+생성합니다.
 
 ## 구현 범위
 
@@ -62,8 +62,8 @@ side_iris_pose_2d: float32[B,2]
 | BlazeGaze transfer | `gaze_pipeline.models.side.blazegaze_transfer:create_model` |
 | MobileNetV4-Conv-S | `gaze_pipeline.models.side.mobilenet_v4:create_model` |
 
-두 함수는 모두 `torch.nn.Module`을 반환합니다. Config의 entrypoint 문자열과 `init_args`는
-검증할 수 있지만 이를 해석하여 factory를 호출하는 product loader는 아직 구현되지 않았습니다.
+두 함수는 모두 `torch.nn.Module`을 반환합니다. Runtime loader는 config의 entrypoint 문자열을
+해석하고 `init_args`를 전달하여 선택한 factory를 호출합니다.
 
 ## Config 적용 순서
 
@@ -92,8 +92,8 @@ make validate-config \
   PROFILES="configs/profiles/blazegaze.yaml configs/profiles/side_profile_90.yaml configs/models/side_mobilenet_v4.yaml"
 ```
 
-이 명령은 config merge와 contract validation만 수행합니다. 선택한 profile이 training이나
-inference에서 model을 자동 교체한다는 뜻은 아닙니다.
+이 명령은 config merge와 contract validation을 수행합니다. Training runtime은 resolve된
+`model.side.entrypoint`와 `init_args`로 선택한 model을 생성합니다.
 
 `make`가 없는 Windows 환경에서는 같은 순서로 CLI를 직접 실행할 수 있습니다.
 
@@ -106,7 +106,7 @@ python -m gaze_pipeline validate-config `
   --skip-path-checks
 ```
 
-## Loader 없이 factory 직접 실행
+## Factory 직접 실행
 
 다음 예시는 network download나 실제 이미지 없이 두 factory를 직접 import하고 synthetic
 forward를 실행합니다.
@@ -271,5 +271,5 @@ Downstream loader/adapter 담당자는 다음 경계를 유지해야 합니다.
 7. 일반 training checkpoint 처리와 BlazeGaze encoder-only transfer payload를 혼합하지
    않습니다.
 
-이 handoff는 향후 통합 계약일 뿐이며 현재 저장소에 runtime loader/adapter가 구현되어 있다는
-뜻은 아닙니다.
+현재 runtime loader의 default adapter는 이 contract를 사용하여 두 Side factory를 호출하고
+표준 residual output을 검증합니다.

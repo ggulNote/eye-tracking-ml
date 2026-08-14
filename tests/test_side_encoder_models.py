@@ -10,7 +10,8 @@ import pytest
 import torch
 import yaml
 
-from gaze_pipeline.config import load_config
+from gaze_pipeline.config import load_and_validate_config, resolve_model_forward_keys
+from gaze_pipeline.model_runtime import build_model_runtime
 from gaze_pipeline.models.side import SideAuxiliaryProjector, SideEncoderHead
 from gaze_pipeline.models.side.components import validate_and_sanitize_side_inputs
 
@@ -23,7 +24,7 @@ MOBILENET_MODEL = PROJECT_ROOT / "configs" / "models" / "side_mobilenet_v4.yaml"
 
 
 def _import_entrypoint_for_test(entrypoint: str) -> Callable[..., Any]:
-    """Resolve a config entrypoint in tests without adding a product loader."""
+    """Resolve a config entrypoint independently of the product loader."""
 
     module_name, separator, attribute_path = entrypoint.partition(":")
     assert separator and module_name and attribute_path
@@ -35,7 +36,7 @@ def _import_entrypoint_for_test(entrypoint: str) -> Callable[..., Any]:
 
 
 def _load_side_model_config(model_config: Path) -> dict[str, Any]:
-    return load_config(
+    return load_and_validate_config(
         BASE_CONFIG,
         profiles=(BLAZEGAZE_PROFILE, SIDE_PROFILE, model_config),
     )
@@ -175,6 +176,34 @@ def test_model_overrides_resolve_to_importable_factories() -> None:
         blazegaze["model"]["side"]["output_contract"]
         == mobilenet["model"]["side"]["output_contract"]
     )
+
+
+@pytest.mark.parametrize("model_config", (BLAZEGAZE_MODEL, MOBILENET_MODEL))
+def test_product_runtime_loads_residual_side_factory(model_config: Path) -> None:
+    config = _load_side_model_config(model_config)
+    side_config = config["model"]["side"]
+    runtime = build_model_runtime(
+        "side",
+        side_config,
+        forward_keys=resolve_model_forward_keys(config, "side"),
+    ).eval()
+    batch = {
+        "side_image": torch.rand(2, 3, 128, 256),
+        "side_head_pose_2d": torch.rand(2, 2),
+        "side_eye_angles": torch.rand(2, 2),
+        "side_iris_pose_2d": torch.rand(2, 2),
+        "side_gaze_valid": torch.ones(2, dtype=torch.bool),
+    }
+
+    with torch.inference_mode():
+        outputs = runtime(batch)
+
+    assert set(outputs) == {"delta_y_side", "side_embedding", "quality"}
+    assert outputs["delta_y_side"].shape == (2, 1)
+    assert outputs["side_embedding"].shape == (2, 256)
+    assert outputs["quality"].shape == (2, 1)
+    assert all(torch.isfinite(value).all() for value in outputs.values())
+    assert torch.all((outputs["quality"] >= 0.0) & (outputs["quality"] <= 1.0))
 
 
 def test_model_yaml_files_are_small_model_side_overrides() -> None:

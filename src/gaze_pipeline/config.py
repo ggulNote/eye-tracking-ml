@@ -1,9 +1,8 @@
 """Configuration loading, interpolation, and validation.
 
-The project documents Hydra-style interpolation, but the two commands that are
-available during data preparation should not need Hydra just to read a YAML
-file.  This module therefore resolves the small, explicit subset used by the
-project itself:
+The project documents Hydra-style interpolation, but the CLI should not need
+Hydra just to read a YAML file. This module resolves the small, explicit subset
+used by validation, data preparation, training, and evaluation:
 
 * ``${oc.env:NAME,default}``
 * ``${now:%Y%m%d_%H%M%S}``
@@ -285,6 +284,7 @@ def validate_config(
         require_model_entrypoints=require_model_entrypoints,
         issues=issues,
     )
+    _validate_execution_config(config, issues)
 
     if check_paths:
         _validate_filesystem_paths(
@@ -1839,8 +1839,26 @@ def _validate_models(
             issues.append(f"model.{branch}.output_contract mapping이 필요합니다.")
         elif isinstance(output_contract, Mapping):
             gaze_shape = output_contract.get("gaze_shape")
-            if gaze_shape != ["B", 2] and gaze_shape != ["B", 2.0]:
-                issues.append(f"model.{branch}.output_contract.gaze_shape은 [B, 2]여야 합니다.")
+            if branch == "front":
+                if gaze_shape != ["B", 2] and gaze_shape != ["B", 2.0]:
+                    issues.append("model.front.output_contract.gaze_shape은 [B, 2]여야 합니다.")
+            else:
+                delta_shape = output_contract.get("delta_y_shape")
+                delta_key = output_contract.get("delta_y_key")
+                if gaze_shape not in (None, ["B", 2], ["B", 2.0]):
+                    issues.append(
+                        "model.side.output_contract.gaze_shape은 null 또는 [B, 2]여야 합니다."
+                    )
+                if gaze_shape is None and delta_shape not in (["B", 1], ["B", 1.0]):
+                    issues.append(
+                        "Side y-residual 계약은 "
+                        "model.side.output_contract.delta_y_shape=[B, 1]이 필요합니다."
+                    )
+                if gaze_shape is None and (not isinstance(delta_key, str) or not delta_key.strip()):
+                    issues.append(
+                        "Side y-residual 계약은 "
+                        "model.side.output_contract.delta_y_key가 필요합니다."
+                    )
 
         pretrained = branch_config.get("pretrained")
         if isinstance(pretrained, Mapping):
@@ -2185,23 +2203,41 @@ def _validate_fusion(
     method = fusion.get("method")
     if not isinstance(method, str) or not method.strip():
         issues.append("fusion.method가 필요합니다.")
+    elif method != "y_axis_residual":
+        issues.append("현재 fusion.method는 y_axis_residual만 지원합니다.")
     if fusion.get("output_shape") != ["B", 2]:
         issues.append("fusion.output_shape은 [B, 2]여야 합니다.")
-    if fusion.get("missing_branch_policy") not in {
-        "use_available_branch",
-        "drop",
-        "error",
-    }:
-        issues.append(
-            "fusion.missing_branch_policy는 use_available_branch, drop, error 중 하나여야 합니다."
-        )
+    if fusion.get("missing_branch_policy") != "use_available_branch":
+        issues.append("현재 fusion.missing_branch_policy는 use_available_branch만 지원합니다.")
 
+    if method == "y_axis_residual":
+        expected_inputs = {"front.gaze_xy", "side.delta_y_side"}
+        input_keys = fusion.get("input_keys")
+        if not isinstance(input_keys, list) or set(input_keys) != expected_inputs:
+            issues.append(
+                "fusion.method=y_axis_residual이면 input_keys는 "
+                "front.gaze_xy와 side.delta_y_side여야 합니다."
+            )
+        side_config = model.get("side", {})
+        side_output = (
+            side_config.get("output_contract", {}) if isinstance(side_config, Mapping) else {}
+        )
+        if not isinstance(side_output, Mapping) or side_output.get("delta_y_shape") not in (
+            ["B", 1],
+            ["B", 1.0],
+        ):
+            issues.append(
+                "y_axis_residual fusion에는 model.side.output_contract.delta_y_shape=[B, 1]이 "
+                "필요합니다."
+            )
     _validate_entrypoint(
         fusion.get("entrypoint"),
         "fusion.entrypoint",
         required=False,
         issues=issues,
     )
+    if fusion.get("entrypoint") not in {None, ""}:
+        issues.append("현재 fusion.entrypoint는 지원하지 않습니다.")
 
     if fusion.get("use_uncertainty") is True:
         for branch in ("front", "side"):
@@ -2236,6 +2272,150 @@ def _validate_entrypoint(value: Any, path: str, *, required: bool, issues: list[
         return
     if not isinstance(value, str) or not _ENTRYPOINT_RE.fullmatch(value):
         issues.append(f"{path}는 'package.module:callable' 형식이어야 합니다 (입력값: {value!r}).")
+
+
+def _validate_execution_config(config: Mapping[str, Any], issues: list[str]) -> None:
+    """Reject values that the built-in train/evaluate runner cannot honor.
+
+    These checks intentionally cover only the runner's stable, shared fields.
+    Profiles may keep model- or experiment-specific extension namespaces.
+    """
+
+    training = _expect_mapping(config, "training", issues)
+    for key in (
+        "max_epochs",
+        "gradient_accumulation_steps",
+        "validate_every_n_epochs",
+    ):
+        value = training.get(key, _MISSING)
+        if not _is_positive_int(value):
+            issues.append(f"training.{key}는 1 이상의 정수여야 합니다 (입력값: {value!r}).")
+    devices = training.get("devices", _MISSING)
+    if not (isinstance(devices, int) and not isinstance(devices, bool) and devices == 1):
+        issues.append(f"현재 training.devices=1만 지원합니다 (입력값: {devices!r}).")
+    precision = training.get("precision", _MISSING)
+    if not (isinstance(precision, int) and not isinstance(precision, bool) and precision == 32):
+        issues.append(f"현재 training.precision=32만 지원합니다 (입력값: {precision!r}).")
+
+    optimizer = _expect_mapping(config, "optimizer", issues)
+    optimizer_name = optimizer.get("name")
+    normalized_optimizer = optimizer_name.lower() if isinstance(optimizer_name, str) else None
+    if normalized_optimizer not in {"adam", "adamw"}:
+        issues.append(f"optimizer.name은 Adam 또는 AdamW여야 합니다 (입력값: {optimizer_name!r}).")
+    learning_rate = optimizer.get("learning_rate", _MISSING)
+    if not _is_positive_finite_number(learning_rate):
+        issues.append(
+            f"optimizer.learning_rate는 0보다 큰 유한한 수여야 합니다 (입력값: {learning_rate!r})."
+        )
+
+    scheduler = _expect_mapping(config, "scheduler", issues)
+    _validate_scheduler_execution_config(scheduler, issues)
+
+    loss = _expect_mapping(config, "loss", issues)
+    primary = loss.get("primary")
+    if not isinstance(primary, Mapping):
+        issues.append("loss.primary는 YAML mapping이어야 합니다.")
+    else:
+        loss_name = primary.get("name")
+        normalized_loss = loss_name.lower() if isinstance(loss_name, str) else None
+        supported_losses = {
+            "huber",
+            "huber_xy",
+            "smooth_l1",
+            "mse",
+            "mse_xy",
+            "weighted_l2_xy",
+            "l2",
+        }
+        if normalized_loss not in supported_losses:
+            issues.append(
+                "loss.primary.name은 Huber, MSE 또는 weighted_l2 계열이어야 합니다 "
+                f"(입력값: {loss_name!r})."
+            )
+
+    checkpoint = _expect_mapping(config, "checkpoint", issues)
+    save_best = checkpoint.get("save_best")
+    if not isinstance(save_best, Mapping):
+        issues.append("checkpoint.save_best는 YAML mapping이어야 합니다.")
+    else:
+        mode = save_best.get("mode")
+        normalized_mode = mode.lower() if isinstance(mode, str) else None
+        if normalized_mode not in {"min", "max"}:
+            issues.append(
+                f"checkpoint.save_best.mode는 min 또는 max여야 합니다 (입력값: {mode!r})."
+            )
+
+    model_export = _expect_mapping(config, "model_export", issues)
+    export_format = model_export.get("format")
+    if export_format != "pytorch_state_dict":
+        issues.append(
+            "현재 model_export.format은 'pytorch_state_dict'만 지원합니다 "
+            f"(입력값: {export_format!r})."
+        )
+
+    mlflow = _expect_mapping(config, "mlflow", issues)
+    for key in (
+        "enabled",
+        "log_system_metrics",
+        "log_resolved_config",
+        "log_dataset_manifest",
+        "log_split_manifest",
+        "log_predictions",
+        "log_environment",
+    ):
+        value = mlflow.get(key, _MISSING)
+        if value is not _MISSING and not isinstance(value, bool):
+            issues.append(f"mlflow.{key}는 true 또는 false여야 합니다 (입력값: {value!r}).")
+
+
+def _validate_scheduler_execution_config(scheduler: Mapping[str, Any], issues: list[str]) -> None:
+    enabled = scheduler.get("enabled", _MISSING)
+    if not isinstance(enabled, bool):
+        issues.append(f"scheduler.enabled는 true 또는 false여야 합니다 (입력값: {enabled!r}).")
+        return
+    if not enabled:
+        return
+
+    name = scheduler.get("name")
+    normalized_name = name.lower() if isinstance(name, str) else None
+    if normalized_name not in {"reducelronplateau", "exponentiallr"}:
+        issues.append(
+            "scheduler.name은 ReduceLROnPlateau 또는 ExponentialLR이어야 합니다 "
+            f"(입력값: {name!r})."
+        )
+        return
+
+    if normalized_name == "exponentiallr":
+        gamma = scheduler.get("gamma", _MISSING)
+        if not _is_positive_finite_number(gamma):
+            issues.append(f"scheduler.gamma는 0보다 큰 유한한 수여야 합니다 (입력값: {gamma!r}).")
+        return
+
+    mode = scheduler.get("mode")
+    normalized_mode = mode.lower() if isinstance(mode, str) else None
+    if normalized_mode not in {"min", "max"}:
+        issues.append(f"scheduler.mode는 min 또는 max여야 합니다 (입력값: {mode!r}).")
+    factor = scheduler.get("factor", _MISSING)
+    if not _is_finite_number_in_range(factor, minimum=0.0, maximum=1.0) or float(factor) in {
+        0.0,
+        1.0,
+    }:
+        issues.append(
+            "ReduceLROnPlateau scheduler.factor는 0보다 크고 1보다 작아야 합니다 "
+            f"(입력값: {factor!r})."
+        )
+    patience = scheduler.get("patience_epochs", _MISSING)
+    if not (isinstance(patience, int) and not isinstance(patience, bool) and patience >= 0):
+        issues.append(
+            "ReduceLROnPlateau scheduler.patience_epochs는 0 이상의 정수여야 합니다 "
+            f"(입력값: {patience!r})."
+        )
+    minimum_learning_rate = scheduler.get("min_learning_rate", _MISSING)
+    if not _is_nonnegative_finite_number(minimum_learning_rate):
+        issues.append(
+            "ReduceLROnPlateau scheduler.min_learning_rate는 0 이상의 유한한 수여야 합니다 "
+            f"(입력값: {minimum_learning_rate!r})."
+        )
 
 
 def _validate_filesystem_paths(
@@ -2388,6 +2568,19 @@ def _is_positive_finite_number(value: Any) -> bool:
         and math.isfinite(float(value))
         and float(value) > 0.0
     )
+
+
+def _is_nonnegative_finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) >= 0.0
+    )
+
+
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 def _is_finite_number_in_range(value: Any, *, minimum: float, maximum: float) -> bool:

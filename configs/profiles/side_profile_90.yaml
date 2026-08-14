@@ -1,6 +1,6 @@
 # 90도 phonecam 이미지용 annotation 기반 측면 전처리 설정입니다.
 # config.yaml과 blazegaze.yaml 다음에 적용합니다.
-# 눈 ROI와 선택 feature 추출은 구현되어 있고 모델 실행과 학습은 아직 없습니다.
+# 눈 ROI·선택 feature와 generic PyTorch residual 학습을 지원합니다.
 
 experiment:
   # 90도 측면 실험을 구분하는 MLflow 이름입니다.
@@ -101,17 +101,17 @@ model:
   side:
     enabled: true
     initialization:
-      # [미구현] shape가 맞는 convolution encoder layer만 전이합니다.
+      # 별도 importer용 metadata이며 generic runner가 이 설정으로 Keras 전이를 실행하지 않습니다.
       mode: webeyetrack_encoder_transfer
       source_framework: tensorflow_keras
       path: "${oc.env:WEBEYETRACK_WEIGHTS,./models/blazegaze_mpiifacegaze.keras}"
       load_scope: convolution_depthwise_batchnorm_encoder
       # 공식 512차원 MLP는 256차원 한쪽 눈 embedding과 맞지 않아 다시 초기화합니다.
       reinitialize: [spatial_projection, gaze_mlp, gaze_output]
-      # 향후 Keras weight 변환 함수를 package.module:callable 형식으로 지정합니다.
+      # Keras weight 변환 함수를 별도로 구현한 경우에만 지정합니다.
       importer_entrypoint: null
     compatibility:
-      # 다른 전처리 형식용 모델이나 weight는 오류로 중단합니다.
+      # 실험 호환성 metadata이며 generic runner가 preprocessing_id를 자동 비교하지 않습니다.
       preprocessing_id: profile90_selectable_features_v3
       on_mismatch: error
     input_contract:
@@ -173,15 +173,23 @@ model:
           role: construct_and_visualize_two_eye_direction_angles
           passed_to_model: false
     output_contract:
-      # [미구현] Side 모델은 정규화 시선 [x,y]와 256차원 embedding을 반환합니다.
-      gaze_key: gaze_xy
-      gaze_shape: [B, 2]
+      # Side는 Front의 y축에 더할 residual 하나만 예측합니다.
+      gaze_key: null
+      gaze_shape: null
+      delta_y_key: delta_y_side
+      delta_y_shape: [B, 1]
       embedding_key: side_embedding
       embedding_shape: [B, 256]
 
 loss:
-  # [미구현] side_gaze_valid가 true인 row만 Side 학습에 사용합니다.
+  # side_gaze_valid가 true인 row만 Side residual loss에 사용합니다.
   branch_auxiliary:
     enabled: true
     side_weight: 1.0
     side_mask_key: side_gaze_valid
+
+fusion:
+  # 이 profile을 적용하면 Front 좌표에 Side y residual을 결합합니다.
+  enabled: true
+  method: y_axis_residual
+  input_keys: [front.gaze_xy, side.delta_y_side]
