@@ -139,15 +139,16 @@ class SideAuxiliaryProjector(nn.Module):
 
 
 class SideEncoderHead(nn.Module):
-    """Build standard Side outputs from image and auxiliary representations.
+    """Build residual Side outputs from image and auxiliary representations.
 
     Inputs:
         image_features: float32 ``[B, image_feature_dim]``.
         auxiliary_features: float32 ``[B, auxiliary_feature_dim]``.
 
     Outputs:
-        ``gaze_xy``: float32 ``[B,2]`` ordered ``(x,y)`` in centered-normalized
-        screen coordinates.  This is an independent Side prediction.
+        ``delta_y_side``: float32 ``[B,1]`` y-axis correction in
+        centered-normalized screen-coordinate units.  Downstream fusion adds
+        this residual to the Front branch's y prediction.
         ``side_embedding``: float32 ``[B,256]`` by default.
         ``quality``: float32 ``[B,1]`` in ``[0,1]`` after sigmoid.  It is not a
         validity mask and does not replace ``side_gaze_valid``.
@@ -181,11 +182,11 @@ class SideEncoderHead(nn.Module):
             nn.LayerNorm(embedding_dim),
             nn.Dropout(dropout),
         )
-        self.gaze_head = nn.Linear(embedding_dim, 2)
+        self.delta_y_head = nn.Linear(embedding_dim, 1)
         self.quality_head = nn.Linear(embedding_dim, 1)
 
     def forward(self, image_features: Tensor, auxiliary_features: Tensor) -> dict[str, Tensor]:
-        """Return ``gaze_xy``, ``side_embedding``, and sigmoid ``quality`` tensors."""
+        """Return ``delta_y_side``, ``side_embedding``, and sigmoid ``quality``."""
 
         _validate_feature_tensor(
             "image_features", image_features, expected_width=self.image_feature_dim
@@ -199,7 +200,7 @@ class SideEncoderHead(nn.Module):
         )
         side_embedding = self.embedding(torch.cat((image_features, auxiliary_features), dim=1))
         return {
-            "gaze_xy": self.gaze_head(side_embedding),
+            "delta_y_side": self.delta_y_head(side_embedding),
             "side_embedding": side_embedding,
             "quality": torch.sigmoid(self.quality_head(side_embedding)),
         }

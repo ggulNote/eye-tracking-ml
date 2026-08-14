@@ -279,7 +279,11 @@ class BlazeGazeTransferSideEncoder(nn.Module):
         side_eye_angles: Tensor | None = None,
         side_iris_pose_2d: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        """Return independent ``gaze_xy``, ``side_embedding``, and ``quality``."""
+        """Return ``delta_y_side``, ``side_embedding``, and sigmoid ``quality``.
+
+        ``delta_y_side`` is float32 ``[B,1]`` in centered-normalized screen y
+        units and is added to the Front y prediction by downstream fusion.
+        """
 
         auxiliary_features = self.auxiliary_projector(
             side_image,

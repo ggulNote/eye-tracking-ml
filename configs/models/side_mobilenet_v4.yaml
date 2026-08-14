@@ -20,13 +20,16 @@ model:
       source_framework: pytorch
       path: null
       load_scope: timm_feature_extractor
-      reinitialize: [side_embedding, gaze_output, quality]
+      reinitialize: [side_embedding, delta_y_side, quality]
       importer_entrypoint: null
     output_contract:
-      gaze_key: gaze_xy
-      gaze_shape: [B, 2]
-      gaze_order: [x, y]
-      gaze_coordinate_system: centered_normalized_screen
+      gaze_key: null
+      gaze_shape: null
+      gaze_order: null
+      gaze_coordinate_system: null
+      delta_y_key: delta_y_side
+      delta_y_shape: [B, 1]
+      delta_y_coordinate_system: centered_normalized_screen_y_residual
       embedding_key: side_embedding
       embedding_shape: [B, 256]
       quality_key: quality

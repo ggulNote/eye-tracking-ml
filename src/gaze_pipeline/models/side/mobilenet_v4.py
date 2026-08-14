@@ -16,7 +16,7 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 class MobileNetV4SideEncoder(nn.Module):
-    """Predict independent Side gaze from a non-square eye image and optional cues.
+    """Predict a Side y-axis residual from a non-square image and optional cues.
 
     External input contract:
         side_image: float32 RGB ``[B,3,128,256]`` in ``[0,1]``.
@@ -27,7 +27,8 @@ class MobileNetV4SideEncoder(nn.Module):
         side_iris_pose_2d: optional float32 ``[B,2]``.
 
     Output contract:
-        gaze_xy: float32 ``[B,2]`` in centered-normalized screen coordinates.
+        delta_y_side: float32 ``[B,1]`` in centered-normalized screen-coordinate
+            y units.  Downstream fusion adds it to the Front y prediction.
         side_embedding: float32 ``[B,embedding_dim]``.
         quality: float32 ``[B,1]`` in ``[0,1]`` after sigmoid.
 
@@ -96,10 +97,10 @@ class MobileNetV4SideEncoder(nn.Module):
         side_eye_angles: Tensor | None = None,
         side_iris_pose_2d: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        """Return ``gaze_xy``, ``side_embedding``, and sigmoid ``quality``.
+        """Return ``delta_y_side``, ``side_embedding``, and sigmoid ``quality``.
 
-        No validity mask, target, Front prediction, or residual target is
-        accepted or returned by this model.
+        No validity mask, target, or Front prediction is accepted by this
+        model.  The returned residual is fused downstream.
         """
 
         auxiliary_features = self.auxiliary_projector(

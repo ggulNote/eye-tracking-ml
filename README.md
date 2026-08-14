@@ -128,10 +128,10 @@ make preprocess-profile90-pose-grid \
 | Front | `front_image [B,3,128,512]` | `front_head_vector [B,3]`, `front_face_origin_3d [B,3]` |
 | Side | `side_image [B,3,128,256]` | config에서 선택한 head pose, eye angle, iris pose |
 
-Side factory의 출력은 `gaze_xy [B,2]`, `side_embedding [B,256]`과 optional
-`quality [B,1]`입니다. 두 구현의 entrypoint, 직접 실행법과 converter 사용법은
-[Side Encoder 문서](docs/side-encoders.md)를 참고하세요. `delta_y_side`는 public model output이
-아닙니다.
+Side factory의 출력은 `delta_y_side [B,1]`, `side_embedding [B,256]`과 optional
+`quality [B,1]`입니다. `delta_y_side`는 Front y에 더하는 centered-normalized residual이며
+Side model은 독립적인 x 좌표를 출력하지 않습니다. 두 구현의 entrypoint, 직접 실행법과
+converter 사용법은 [Side Encoder 문서](docs/side-encoders.md)를 참고하세요.
 
 Side 이미지 ROI는 항상 생성되고 아래 feature만 config로 선택합니다.
 

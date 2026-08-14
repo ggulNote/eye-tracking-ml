@@ -22,7 +22,7 @@ runtime loader/registry/adapter는 아직 없습니다.
 - runtime model loader, registry와 adapter
 - Trainer, loss, metric, optimizer와 scheduler
 - Front Encoder
-- late fusion, residual target와 `delta_y_side`
+- late fusion과 residual target 생성
 - checkpoint 관리, MLflow 학습과 inference pipeline
 
 ## Side tensor contract
@@ -46,14 +46,14 @@ side_iris_pose_2d: float32[B,2]
 
 | Key | Shape | 의미 |
 |---|---|---|
-| `gaze_xy` | `float32[B,2]` | `(x,y)` centered-normalized screen coordinate의 독립 Side 예측 |
+| `delta_y_side` | `float32[B,1]` | Front y에 더할 centered-normalized screen y residual |
 | `side_embedding` | `float32[B,256]` | downstream 결합을 위한 Side representation |
 | `quality` | optional `float32[B,1]` | sigmoid가 적용된 `[0,1]` 신호 |
 
-현재 두 factory는 세 key를 모두 반환합니다. Downstream adapter는 `gaze_xy`와
+현재 두 factory는 세 key를 모두 반환합니다. Downstream adapter는 `delta_y_side`와
 `side_embedding`을 필수로 다루고 `quality`는 존재할 때 소비할 수 있습니다. `quality`는
-`side_gaze_valid`를 대체하지 않습니다. `delta_y_side`나 다른 residual target은 public output이
-아닙니다.
+`side_gaze_valid`를 대체하지 않습니다. Side 모델은 독립적인 x 좌표나 `gaze_xy`를 반환하지
+않습니다. Downstream fusion은 `delta_y_side`를 Front branch의 y 예측에 더합니다.
 
 ## Model entrypoint
 
@@ -138,7 +138,7 @@ for name, model in models.items():
     model.eval()
     with torch.inference_mode():
         output = model(side_image, **auxiliary)
-    assert output["gaze_xy"].shape == (batch_size, 2), name
+    assert output["delta_y_side"].shape == (batch_size, 1), name
     assert output["side_embedding"].shape == (batch_size, 256), name
     if "quality" in output:
         assert output["quality"].shape == (batch_size, 1), name
@@ -193,7 +193,8 @@ license: MIT
 PyTorch model은 공식 first Conv2D, single Blaze block 5개, double Blaze block 6개와 squeeze
 Conv2D/BatchNorm 순서를 재현합니다. TensorFlow SAME의 동적 비대칭 padding도 유지합니다.
 공식 width 512와 Side width 256의 공간 크기가 다르므로 convolution encoder tensor만 전이하고
-Side flatten projection, auxiliary projection, embedding, gaze와 quality head는 새로 초기화합니다.
+Side flatten projection, auxiliary projection, embedding, 1차원 residual과 quality head는 새로
+초기화합니다.
 
 `encoder_weights_path=None`은 file I/O 없는 random initialization입니다. 공식 `.keras`의
 encoder weight를 사용하려면 TensorFlow를 별도 converter 환경에만 설치하고 다음 명령을 한 번
@@ -263,10 +264,10 @@ Downstream loader/adapter 담당자는 다음 경계를 유지해야 합니다.
    전달하지 않습니다.
 4. `side_gaze_valid`, target과 Front prediction은 forward에 넣지 않고 downstream mask로
    유지합니다.
-5. `gaze_xy [B,2]`와 `side_embedding [B,256]`을 필수로 검증합니다. `quality`가 있으면
+5. `delta_y_side [B,1]`와 `side_embedding [B,256]`을 필수로 검증합니다. `quality`가 있으면
    `[B,1]`, finite, `[0,1]`인지 검증하되 validity mask로 대체하지 않습니다.
-6. Side `gaze_xy`는 독립 예측으로 유지합니다. residual target, `delta_y_side` 또는 fusion
-   의미를 model output에 추가하지 않습니다.
+6. `delta_y_side`는 centered-normalized screen y 단위의 residual입니다. Downstream fusion은
+   Front의 x를 유지하고 `front.gaze_xy[:,1:2] + side.delta_y_side`로 최종 y를 구성합니다.
 7. 일반 training checkpoint 처리와 BlazeGaze encoder-only transfer payload를 혼합하지
    않습니다.
 

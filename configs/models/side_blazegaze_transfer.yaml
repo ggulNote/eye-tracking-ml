@@ -1,6 +1,6 @@
 # side_profile_90.yaml 위에 적용하는 BlazeGaze convolution encoder model override입니다.
 # encoder topology는 WebEyeTrack commit 14719ad의 get_cnn_encoder를 재현합니다.
-# Keras weight import는 아직 구현되지 않았으며 null은 random initialization입니다.
+# null은 random initialization이며 converter가 만든 encoder-only .pt 경로로 바꿀 수 있습니다.
 model:
   side:
     entrypoint: gaze_pipeline.models.side.blazegaze_transfer:create_model
@@ -11,10 +11,13 @@ model:
       auxiliary_dim: 32
       dropout: 0.0
     output_contract:
-      gaze_key: gaze_xy
-      gaze_shape: [B, 2]
-      gaze_order: [x, y]
-      gaze_coordinate_system: centered_normalized_screen
+      gaze_key: null
+      gaze_shape: null
+      gaze_order: null
+      gaze_coordinate_system: null
+      delta_y_key: delta_y_side
+      delta_y_shape: [B, 1]
+      delta_y_coordinate_system: centered_normalized_screen_y_residual
       embedding_key: side_embedding
       embedding_shape: [B, 256]
       quality_key: quality

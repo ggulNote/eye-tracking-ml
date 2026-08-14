@@ -10,7 +10,7 @@ import pytest
 import torch
 import yaml
 
-from gaze_pipeline.config import load_and_validate_config
+from gaze_pipeline.config import load_config
 from gaze_pipeline.models.side import SideAuxiliaryProjector, SideEncoderHead
 from gaze_pipeline.models.side.components import validate_and_sanitize_side_inputs
 
@@ -35,7 +35,7 @@ def _import_entrypoint_for_test(entrypoint: str) -> Callable[..., Any]:
 
 
 def _load_side_model_config(model_config: Path) -> dict[str, Any]:
-    return load_and_validate_config(
+    return load_config(
         BASE_CONFIG,
         profiles=(BLAZEGAZE_PROFILE, SIDE_PROFILE, model_config),
     )
@@ -132,19 +132,20 @@ def test_auxiliary_projector_has_fixed_head_eye_iris_slots() -> None:
     assert torch.count_nonzero(front_head[:, 8:]) == 0
 
 
-def test_common_head_returns_only_standard_independent_side_outputs() -> None:
+def test_common_head_returns_only_standard_residual_side_outputs() -> None:
     torch.manual_seed(7)
     head = SideEncoderHead(16, 12, embedding_dim=256)
 
     outputs = head(torch.randn(3, 16), torch.randn(3, 12))
 
-    assert set(outputs) == {"gaze_xy", "side_embedding", "quality"}
-    assert outputs["gaze_xy"].shape == (3, 2)
+    assert head.delta_y_head.out_features == 1
+    assert set(outputs) == {"delta_y_side", "side_embedding", "quality"}
+    assert outputs["delta_y_side"].shape == (3, 1)
     assert outputs["side_embedding"].shape == (3, 256)
     assert outputs["quality"].shape == (3, 1)
     assert all(value.dtype == torch.float32 for value in outputs.values())
     assert torch.all((outputs["quality"] >= 0.0) & (outputs["quality"] <= 1.0))
-    assert "delta_y_side" not in outputs
+    assert "gaze_xy" not in outputs
 
 
 def test_public_component_signature_excludes_pipeline_only_inputs() -> None:
@@ -163,8 +164,10 @@ def test_model_overrides_resolve_to_importable_factories() -> None:
     for config in (blazegaze, mobilenet):
         side = config["model"]["side"]
         assert _import_entrypoint_for_test(side["entrypoint"])
-        assert side["output_contract"]["gaze_key"] == "gaze_xy"
-        assert side["output_contract"]["gaze_shape"] == ["B", 2]
+        assert side["output_contract"]["gaze_key"] is None
+        assert side["output_contract"]["gaze_shape"] is None
+        assert side["output_contract"]["delta_y_key"] == "delta_y_side"
+        assert side["output_contract"]["delta_y_shape"] == ["B", 1]
         assert side["output_contract"]["embedding_shape"] == ["B", 256]
         assert side["output_contract"]["quality_shape"] == ["B", 1]
 
@@ -196,7 +199,7 @@ def test_mobilenet_override_replaces_webeyetrack_initialization_metadata() -> No
         "source_framework": "pytorch",
         "path": None,
         "load_scope": "timm_feature_extractor",
-        "reinitialize": ["side_embedding", "gaze_output", "quality"],
+        "reinitialize": ["side_embedding", "delta_y_side", "quality"],
         "importer_entrypoint": None,
     }
 
