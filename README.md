@@ -2,7 +2,7 @@
 
 새로 수집할 정면 `webcam`과 90도 측면 `phonecam` 정지 이미지로 시선 추정 데이터를 준비하는 config 기반 파이프라인입니다.
 
-현재 구현 범위는 **DB manifest 검증 → 사람 단위 split → Front/Side 전처리 → MLflow 데이터 준비 기록**입니다. 모델 학습과 late fusion은 아직 구현되지 않았습니다.
+현재 data pipeline 범위는 **DB manifest 검증 → 사람 단위 split → Front/Side 전처리 → MLflow 데이터 준비 기록**입니다. 이와 별도로 직접 import해 실행할 수 있는 Side model factory 두 개와 BlazeGaze encoder weight converter가 구현되어 있습니다. Runtime model loader/adapter, 모델 학습과 late fusion은 아직 구현되지 않았습니다.
 
 ## 아키텍처
 
@@ -15,7 +15,9 @@ flowchart LR
     D --> F["Front 전처리<br/>(구현)"]
     D --> P["90도 Side 전처리<br/>(구현)"]
     F -.-> FT["Front 모델 학습<br/>(미구현)"]
-    P -.-> ST["Side 모델 학습<br/>(미구현)"]
+    P -.-> SF["Side model factory 2개<br/>(직접 호출 구현)"]
+    SF -.-> SA["Side loader · adapter<br/>(미구현)"]
+    SA -.-> ST["Side 모델 학습<br/>(미구현)"]
     FT -.-> L["Late fusion · 평가 · 저장<br/>(미구현)"]
     ST -.-> L
 ```
@@ -26,7 +28,12 @@ flowchart LR
 | Front BlazeGaze 입력과 Side 한쪽 눈 입력 | 구현 |
 | EAR, head pose, 눈 방향 feature | 구현 |
 | MLflow manifest·config·환경 기록 | 구현 |
-| 모델 adapter, 학습, metric, checkpoint | 미구현 |
+| Side model factory: MobileNetV4-Conv-S, BlazeGaze transfer | 구현—직접 import 실행 |
+| Side model profile과 config contract validation | 구현—runtime 자동 loading은 아님 |
+| BlazeGaze `.keras` encoder-only converter | 구현—TensorFlow는 변환 시에만 선택 사용 |
+| Front Encoder | 미구현 |
+| Model loader/registry와 adapter | 미구현 |
+| Trainer, loss, metric, optimizer, scheduler와 checkpoint | 미구현 |
 | Late fusion | 미구현 |
 
 ## 새로 구축할 DB
@@ -121,6 +128,11 @@ make preprocess-profile90-pose-grid \
 | Front | `front_image [B,3,128,512]` | `front_head_vector [B,3]`, `front_face_origin_3d [B,3]` |
 | Side | `side_image [B,3,128,256]` | config에서 선택한 head pose, eye angle, iris pose |
 
+Side factory의 출력은 `gaze_xy [B,2]`, `side_embedding [B,256]`과 optional
+`quality [B,1]`입니다. 두 구현의 entrypoint, 직접 실행법과 converter 사용법은
+[Side Encoder 문서](docs/side-encoders.md)를 참고하세요. `delta_y_side`는 public model output이
+아닙니다.
+
 Side 이미지 ROI는 항상 생성되고 아래 feature만 config로 선택합니다.
 
 ```yaml
@@ -141,6 +153,7 @@ feature_extraction:
 configs/config.yaml
   + configs/profiles/blazegaze.yaml
   + configs/profiles/side_profile_90.yaml
+  + configs/models/<selected-side-model>.yaml
   + CLI override
 ```
 
@@ -156,7 +169,12 @@ make validate-config OVERRIDES="data.dataloader.batch_size=16"
 | `configs/config.yaml` | 새 dual-view DB, split, 공통 전처리와 실행 설정 |
 | `configs/profiles/blazegaze.yaml` | Front 입력 전처리 계약 |
 | `configs/profiles/side_profile_90.yaml` | 90도 Side 한쪽 눈과 feature 설정 |
+| `configs/models/side_blazegaze_transfer.yaml` | BlazeGaze transfer factory override |
+| `configs/models/side_mobilenet_v4.yaml` | MobileNetV4 factory override |
 | `configs/profiles/demo_two_images.yaml` | 합성 데이터 smoke test |
+
+Model profile을 마지막에 적용하면 entrypoint와 contract가 resolve되지만, 현재 training이나
+inference runtime이 이를 읽어 model을 자동 생성하지는 않습니다.
 
 ## 결과
 
@@ -171,4 +189,5 @@ mlruns/
 
 `checkpoint/*.pt`, 예측 metric과 fusion 결과는 학습 실행기 구현 후 생성됩니다.
 
-상세 내용은 [아키텍처](docs/architecture.md), [설정 설명](docs/configuration.md), [기여 가이드](CONTRIBUTING.md)를 참고하세요.
+상세 내용은 [Side Encoder](docs/side-encoders.md), [아키텍처](docs/architecture.md),
+[설정 설명](docs/configuration.md), [기여 가이드](CONTRIBUTING.md)를 참고하세요.
