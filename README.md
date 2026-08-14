@@ -32,6 +32,24 @@ flowchart LR
 | Front 고정 x + Side y-residual fusion | 구현 |
 | 공식 WebEyeTrack Front `.keras` 실행 | 구현 (`Keras 3` torch backend wrapper, SHA 검증) |
 
+## 이번 업데이트의 핵심
+
+이번 구현에서는 데이터 준비까지만 가능했던 기존 파이프라인에 **모델 실행 경계와 실제
+학습·평가 경로**를 추가했습니다.
+
+| 영역 | 구현 내용 | 주요 코드 |
+|---|---|---|
+| Model loader | `package.module:callable` factory 동적 import, 외부 `source_dir`, `init_args` 지원 | `src/gaze_pipeline/model_runtime.py` |
+| Model adapter | canonical batch를 모델 입력으로 변환하고 모델별 출력을 표준 key로 정규화 | `DefaultModelAdapter`, `ModelRuntime` |
+| 안전한 weight load | `.pt`/`.pth` state dict만 `weights_only=True`로 로드, SHA-256·strict 검사 | `load_pytorch_state_dict` |
+| Front model | 공식 WebEyeTrack BlazeGaze `.keras`를 Keras 3 torch backend로 실행 | `src/gaze_pipeline/models/webeyetrack_front.py` |
+| Side model | 한쪽 눈 이미지와 선택 geometry feature로 `delta_y_side` 예측 | `src/gaze_pipeline/models/simple_side.py` |
+| Trainer | train/validation loop, loss·metric, resume, best/last/final checkpoint | `src/gaze_pipeline/training.py` |
+| Tracking | 학습·평가 metric과 checkpoint lineage를 MLflow에 기록 | `src/gaze_pipeline/training_tracking.py` |
+
+내장 fallback Front/Side 모델과 `SimpleSideResidualModel`은 입출력 연결을 검증하기 위한 작은
+모델입니다. 최종 성능 모델이나 benchmark 결과를 의미하지 않습니다.
+
 ## 새로 구축할 DB
 
 기본 config는 기존 실험 데이터를 읽지 않습니다. `data.reader.type: generic_csv`로 설정되어 있으며 새로 만든 `DUAL_VIEW_MANIFEST`만 데이터 입력으로 사용합니다.
@@ -64,7 +82,7 @@ p001_001_side,p001,phonecam,p001/phonecam/001.jpg,p001_001,960,540,1920,1080
 
 전체 column 설명은 [데이터 형식](docs/dataset-format.md)에 있습니다.
 
-## 설치와 검사
+## 빠른 시작
 
 Python `3.12`를 사용합니다.
 
@@ -72,6 +90,16 @@ Python `3.12`를 사용합니다.
 make paths
 make setup-dev
 make check-setup
+make demo-dual-train
+```
+
+`make demo-dual-train`은 외부 DB나 pretrained weight 없이 합성 dual-view 데이터를 생성하고,
+Front/Side forward부터 Y축 residual fusion, 2 epoch 학습, checkpoint, MLflow 기록까지 한 번에
+확인합니다. 정확도 benchmark가 아니라 end-to-end wiring smoke test입니다.
+
+전체 unit test와 정적 검사를 실행하려면 다음 명령을 사용합니다.
+
+```bash
 make check
 ```
 
@@ -97,15 +125,8 @@ make demo-mlflow-check
 make demo-mlflow-ui MLFLOW_PORT=5001
 ```
 
-Front/Side 모델과 Y축 residual fusion까지 한 번에 검사하려면 다음을 실행합니다.
-
-```bash
-make demo-dual-train
-```
-
-이 명령은 `.demo/dual_view_training`에 비생체 합성 이미지와 annotation manifest를 만들고
-2 epoch 학습 후 best/last/final `.pt`를 저장하고 별도 `mlflow-training-demo.db`의 FINISHED
-training run까지 검사합니다. 연결 확인용이며 모델 정확도 benchmark는 아닙니다.
+합성 dual-view smoke 결과는 `.demo/dual_view_training` 아래에 저장되며, 별도
+`mlflow-training-demo.db`에서 FINISHED training run까지 확인할 수 있습니다.
 
 실제 `data(ver1)`의 p00/p03으로 read-only smoke를 실행하려면 먼저 source manifest를 만듭니다.
 
@@ -119,7 +140,7 @@ MLflow data-preparation 기록, 1 epoch 학습, checkpoint 재로딩 validation 
 아래는 manifest와 prepare만 따로 실행하는 방법입니다.
 
 ```bash
-DATA_VER1_ROOT='/Users/seungyeonlee/Library/Mobile Documents/com~apple~CloudDocs/02. FLYAI/project_data/data(ver1)'
+DATA_VER1_ROOT='/absolute/path/to/data(ver1)'
 DATA_VER1_MANIFEST="$PWD/.demo/data_ver1_smoke/manifest.csv"
 
 .venv/bin/python scripts/create_data_ver1_manifest.py \
@@ -144,11 +165,11 @@ MLFLOW_TRACKING_URI="sqlite:///$PWD/.demo/data_ver1_smoke/mlflow.db" \
 수정하지 않으며, manifest와 output은 반드시 원본 DB 밖에 둡니다. 이 smoke split은 원본 protocol
 열을 무시하고 p00 전체를 train, p03 전체를 validation에 배정하며 test는 비어 있습니다.
 
-Side annotation이 필요하면 생성 명령에 `--dummy-side-annotations --force`를 추가할 수 있습니다.
-이 값은 p00/p03별 고정 좌표를 넣는 배선 확인용 데이터일 뿐 정답 label이나 성능 학습용 annotation이
-아닙니다. `annotation_source=dummy_smoke` 표시는 생성한 source manifest에만 남고 현재 generic
-canonical prepare에는 보존되지 않습니다. 이 옵션이 없으면 Side annotation은 빈 값이고
-`eye_annotation_valid=false`입니다. phonecam은 촬영 설계상 90도 바로 측면으로 사용합니다.
+위 예시의 `--dummy-side-annotations`는 p00/p03별 고정 좌표를 넣는 배선 확인 옵션일 뿐,
+정답 label이나 성능 학습용 annotation이 아닙니다. 실제 annotation 없이 manifest만 만들려면 이
+옵션을 제거하세요. 이 경우 Side annotation은 빈 값이고 `eye_annotation_valid=false`입니다.
+`annotation_source=dummy_smoke` 표시는 생성한 source manifest에만 남고 현재 generic canonical
+prepare에는 보존되지 않습니다. phonecam은 촬영 설계상 90도 바로 측면으로 사용합니다.
 다만 원본 `participant.json`의 `position`에는 `participant_left_30_45_deg`가 남아 있어 촬영 의도와
 metadata가 충돌합니다. pipeline은 사용자 확인에 따라 strict 90도 계약을 사용하며, 정식 DB를
 확정할 때 원본 metadata도 함께 바로잡아야 합니다.
@@ -170,16 +191,29 @@ make mlflow-ui
 
 이 단계는 이미지를 복사하지 않고 경로, pair, label, split, hash를 기록합니다.
 
-## 학습과 평가
+## 모델 로더와 어댑터
 
-모델 코드는 pipeline에 복사하지 않아도 됩니다. 각 branch에
-`source_dir`, `entrypoint`, `adapter_entrypoint`, `init_args`를 지정하면 generic runner가
-동적으로 불러옵니다. `pretrained.path`는 PyTorch `.pt`/`.pth` state_dict를 지원하며 SHA-256과
-strict load를 적용할 수 있습니다.
+모델 코드를 이 저장소에 복사할 필요는 없습니다. 각 branch의 `source_dir`과
+`entrypoint`를 지정하면 runner가 `package.module:callable` factory를 import하고
+`init_args`만 keyword argument로 전달합니다.
+
+```text
+canonical batch
+  → input contract 검사
+  → adapter.to_model_inputs(batch)
+  → model(*args, **kwargs)
+  → adapter.to_standard_outputs(raw_output)
+  → output contract 검사
+  → loss / metric / fusion
+```
+
+### 외부 모델 연결
 
 ```yaml
 model:
   front:
+    enabled: true
+    source_dir: /absolute/path/to/model/repository
     entrypoint: my_models.front:create_model
     adapter_entrypoint: my_models.front:create_adapter
     init_args: {hidden_dim: 256}
@@ -189,11 +223,60 @@ model:
       strict: true
 ```
 
-`entrypoint: null`이면 입출력 계약을 확인할 수 있는 작은 기본 PyTorch 회귀 모델을 사용합니다.
-이는 연결 smoke test용이며 실제 성능 모델을 대신하지 않습니다. generic `pretrained.path`는
-`.pt`/`.pth` state_dict 전용입니다. 공식 WebEyeTrack Front `.keras`는 별도 factory가 archive
-SHA-256을 검증하고 Keras 3의 torch backend로 안전하게 불러오며, 위 `data_ver1_smoke`
-profile이 그 factory를 연결합니다. 임의 Keras 모델을 가져오는 범용 importer는 아닙니다.
+`source_dir`은 선택 사항입니다. 모델 package가 현재 환경에 설치되어 있으면 `null`로 둘 수
+있습니다. `entrypoint: null`이면 contract smoke test용 내장 회귀 모델을 사용합니다.
+
+### Adapter contract
+
+모델이 canonical key를 그대로 keyword argument로 받고 표준 출력을 반환하면
+`adapter_entrypoint: null`로 두어 `DefaultModelAdapter`를 사용합니다. 기본 adapter는 다음을
+처리합니다.
+
+- `input_contract.forward_keys`에 선언된 tensor를 모델의 keyword argument로 전달
+- Mapping 출력은 그대로 사용하고, 단일 Tensor나 `(prediction, embedding)` 출력은 표준 key로 변환
+- Front의 `gaze_xy [B,2]`, Side의 `delta_y_side [B,1]` shape 검증
+
+모델의 인자명이나 출력 구조가 다를 때만 아래 interface를 구현한 custom adapter를 연결합니다.
+
+```python
+class FrontAdapter:
+    def to_model_inputs(self, batch):
+        return {"image": batch["front_image"]}
+
+    def to_standard_outputs(self, raw_output):
+        return {"gaze_xy": raw_output["prediction"]}
+
+
+def create_adapter(**_context):
+    return FrontAdapter()
+```
+
+`to_model_inputs()`는 kwargs Mapping 또는 `(args, kwargs)`를 반환할 수 있습니다. Adapter factory는
+필요한 경우 `model`, `branch`, `input_contract`, `output_contract`, `forward_keys`를 이름으로
+받을 수 있습니다.
+
+### Weight와 내장 모델
+
+| 선택 | 용도 |
+|---|---|
+| `entrypoint: null` | Front/Side contract를 확인하는 내장 PyTorch fallback |
+| `gaze_pipeline.models.webeyetrack_front:create_model` | 공식 WebEyeTrack BlazeGaze Front `.keras` 실행 |
+| `gaze_pipeline.models.simple_side:create_model` | Side 이미지와 선택 geometry feature를 소비하는 residual smoke model |
+| 사용자 `entrypoint` + 선택 adapter | 외부 PyTorch 모델 연결 |
+
+generic `pretrained.path`는 `.pt`/`.pth` state dict 전용입니다. 로드할 때
+`torch.load(..., weights_only=True)`와 선택적 SHA-256 및 strict key 검사를 적용합니다. 공식 WebEyeTrack Front
+`.keras`는 별도 factory가 archive SHA-256을 검증하고 Keras 3 torch backend로 불러옵니다.
+`configs/profiles/data_ver1_smoke.yaml`이 이 factory를 연결하며, 임의 Keras 모델을 가져오는 범용
+importer는 제공하지 않습니다.
+
+Raw state dict뿐 아니라 `state_dict`, `model_state_dict`, `model` wrapper를 인식하며, 모든 key가
+`module.`로 시작하는 DataParallel checkpoint는 prefix를 제거한 뒤 로드합니다.
+
+외부 `entrypoint`는 Python 코드를 실제로 import하고 실행합니다. 따라서 source와 dependency가
+신뢰할 수 있는지 확인하고, 가능하면 commit hash와 weight checksum을 함께 기록해야 합니다.
+
+## 학습과 평가
 
 아래 profile 조합도 `model.front.entrypoint`와 `model.side.entrypoint`를 따로 지정하지 않으면
 BlazeGaze 자체가 아니라 내장 fallback 모델을 학습합니다. 실제 모델 학습에서는 각 branch의
@@ -226,6 +309,11 @@ make evaluate \
 `unpaired_policy: branch_only`는 불완전 row를 prepared manifest와 single-view Dataset에 남기는
 정책이며, 해당 row를 학습하려면 Front-only 또는 Side-only run을 별도로 실행해야 합니다.
 
+현재 generic runner의 실행 범위는 PyTorch backend, 단일 device, precision 32입니다. Fusion은
+내장 `y_axis_residual`만 지원하고 custom `fusion.entrypoint`는 아직 실행하지 않습니다.
+`side_profile_90.yaml`의 `initialization`과 `compatibility`는 실험 metadata이며 Keras encoder
+weight transfer를 자동으로 수행하지 않습니다.
+
 ## 전처리 확인
 
 ```bash
@@ -244,10 +332,24 @@ make preprocess-profile90-pose-grid \
 실행 시 runtime은 primary image와 선택된 auxiliary 입력의 key·shape·dtype·finite 여부 및
 `value_range`, 그리고 표준 출력 shape을 첫 forward부터 검사합니다.
 
-| Branch | 이미지 | 추가 feature |
+| 실행 구성 | Primary image | 추가 model input |
 |---|---|---|
-| Front | `front_image [B,3,128,512]` | `front_head_vector [B,3]`, `front_face_origin_3d [B,3]` |
-| Side | `side_image [B,3,128,256]` | config에서 선택한 head pose, eye angle, iris pose |
+| 기본 config Front fallback | `front_image [B,3,224,224]` | 없음 |
+| `blazegaze.yaml` Front | `front_image [B,3,128,512]` | `front_head_vector [B,3]`, `front_face_origin_3d [B,3]` |
+| `side_profile_90.yaml` Side | `side_image [B,3,128,256]` | 활성화한 head pose, eye angle, iris pose |
+
+`entrypoint: null`인 내장 fallback은 primary image만 실제 예측에 사용합니다. Side profile의
+`forward_keys: auto`는 활성화된 feature에 맞춰 다음 입력을 순서대로 선택합니다.
+
+```text
+side_image
++ side_head_pose_2d 또는 front_head_vector
++ side_eye_angles
++ side_iris_pose_2d
+```
+
+비활성화한 feature는 모델에 전달하지 않습니다. `side_ear`, `side_selected_eye_index` 같은
+diagnostic 값도 모델 입력이 아니며, validity 값은 loss·metric·fusion mask로 사용합니다.
 
 Side 이미지 ROI는 항상 생성되고 아래 feature만 config로 선택합니다.
 
@@ -292,8 +394,11 @@ make validate-config OVERRIDES="data.dataloader.batch_size=16"
 | `configs/config.yaml` | 새 dual-view DB, split, 공통 전처리와 실행 설정 |
 | `configs/profiles/blazegaze.yaml` | Front 입력 전처리 계약 |
 | `configs/profiles/side_profile_90.yaml` | 90도 Side 한쪽 눈과 feature 설정 |
+| `configs/profiles/side_one_eye.yaml` | landmark 기반 best-visible Side 눈 crop 실험 |
+| `configs/profiles/side_full_face.yaml` | Side 전체 얼굴 crop 실험 |
 | `configs/profiles/demo_two_images.yaml` | 합성 Front 데이터·MLflow smoke test |
 | `configs/profiles/demo_dual_view_training.yaml` | 합성 dual-view 전체 학습 smoke test |
+| `configs/profiles/data_ver1_smoke.yaml` | p00/p03 실제 DB의 read-only wiring smoke test |
 
 ## 결과
 
