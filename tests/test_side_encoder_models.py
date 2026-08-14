@@ -156,7 +156,7 @@ def test_public_component_signature_excludes_pipeline_only_inputs() -> None:
     assert "front_prediction" not in parameters
 
 
-def test_model_overrides_resolve_to_importable_placeholder_factories() -> None:
+def test_model_overrides_resolve_to_importable_factories() -> None:
     blazegaze = _load_side_model_config(BLAZEGAZE_MODEL)
     mobilenet = _load_side_model_config(MOBILENET_MODEL)
 
@@ -195,7 +195,24 @@ def test_mobilenet_override_replaces_webeyetrack_initialization_metadata() -> No
         "mode": "mobilenet_v4",
         "source_framework": "pytorch",
         "path": None,
-        "load_scope": "full_backbone",
+        "load_scope": "timm_feature_extractor",
         "reinitialize": ["side_embedding", "gaze_output", "quality"],
         "importer_entrypoint": None,
+    }
+
+
+def test_mobilenet_config_uses_exact_offline_safe_timm_model() -> None:
+    config = _load_side_model_config(MOBILENET_MODEL)
+    side = config["model"]["side"]
+
+    assert side["entrypoint"] == "gaze_pipeline.models.side.mobilenet_v4:create_model"
+    assert side["init_args"] == {
+        "model_id": "mobilenetv4_conv_small.e2400_r224_in1k",
+        "pretrained": False,
+        "embedding_dim": 256,
+        "auxiliary_dim": 32,
+        "normalize_imagenet": True,
+        "image_mean": [0.485, 0.456, 0.406],
+        "image_std": [0.229, 0.224, 0.225],
+        "dropout": 0.0,
     }
