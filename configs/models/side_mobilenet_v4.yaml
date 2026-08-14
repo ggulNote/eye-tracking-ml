@@ -1,0 +1,30 @@
+# side_profile_90.yaml 위에 적용하는 MobileNet-v4 model override입니다.
+# 이전 profile의 WebEyeTrack initialization metadata를 아래 값으로 모두 덮어씁니다.
+model:
+  side:
+    entrypoint: gaze_pipeline.models.side:create_mobilenet_v4_side_encoder
+    init_args:
+      variant: small
+      image_feature_dim: 960
+      auxiliary_projection_dim: 32
+      embedding_dim: 256
+      dropout: 0.0
+    initialization:
+      mode: mobilenet_v4
+      source_framework: pytorch
+      path: null
+      load_scope: full_backbone
+      reinitialize: [side_embedding, gaze_output, quality]
+      importer_entrypoint: null
+    output_contract:
+      gaze_key: gaze_xy
+      gaze_shape: [B, 2]
+      gaze_order: [x, y]
+      gaze_coordinate_system: centered_normalized_screen
+      embedding_key: side_embedding
+      embedding_shape: [B, 256]
+      quality_key: quality
+      quality_shape: [B, 1]
+      quality_activation: sigmoid
+      uncertainty_key: null
+

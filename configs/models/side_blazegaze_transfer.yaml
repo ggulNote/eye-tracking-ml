@@ -1,0 +1,22 @@
+# side_profile_90.yaml 위에 적용하는 BlazeGaze encoder-transfer model override입니다.
+# 실제 image backbone과 Keras weight import는 아직 구현되지 않았습니다.
+model:
+  side:
+    entrypoint: gaze_pipeline.models.side:create_blazegaze_transfer_side_encoder
+    init_args:
+      image_feature_dim: 256
+      auxiliary_projection_dim: 32
+      embedding_dim: 256
+      dropout: 0.0
+    output_contract:
+      gaze_key: gaze_xy
+      gaze_shape: [B, 2]
+      gaze_order: [x, y]
+      gaze_coordinate_system: centered_normalized_screen
+      embedding_key: side_embedding
+      embedding_shape: [B, 256]
+      quality_key: quality
+      quality_shape: [B, 1]
+      quality_activation: sigmoid
+      uncertainty_key: null
+
