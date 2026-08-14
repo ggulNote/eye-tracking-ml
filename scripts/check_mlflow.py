@@ -90,7 +90,11 @@ def main() -> int:
         return 2
     print(f"[OK] MLflow DB: {database_path}")
     if not database_path.is_file():
-        print("[FAIL] MLflow DB가 없습니다. 먼저 make prepare를 실행하세요.", file=sys.stderr)
+        print(
+            "[FAIL] MLflow DB가 없습니다. 먼저 make prepare, make train 또는 "
+            "make demo-dual-train을 실행하세요.",
+            file=sys.stderr,
+        )
         return 2
 
     read_only_uri = f"file:{quote(str(database_path))}?mode=ro"

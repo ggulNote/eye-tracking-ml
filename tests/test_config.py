@@ -17,6 +17,29 @@ BASE_CONFIG = PROJECT_ROOT / "configs" / "config.yaml"
 PROFILE90_CONFIG = PROJECT_ROOT / "configs" / "profiles" / "side_profile_90.yaml"
 
 
+@pytest.mark.parametrize(
+    "profile_names",
+    [
+        (),
+        ("blazegaze.yaml",),
+        ("demo_dual_view_training.yaml",),
+        ("demo_two_images.yaml",),
+        ("side_full_face.yaml",),
+        ("side_one_eye.yaml",),
+        ("blazegaze.yaml", "side_profile_90.yaml"),
+    ],
+)
+def test_execution_config_validation_accepts_shipped_profiles(
+    profile_names: tuple[str, ...],
+) -> None:
+    profile_dir = PROJECT_ROOT / "configs" / "profiles"
+
+    load_and_validate_config(
+        BASE_CONFIG,
+        profiles=tuple(profile_dir / name for name in profile_names),
+    )
+
+
 def test_base_config_resolves_environment_references_and_overrides(tmp_path: Path) -> None:
     fixed_now = datetime(2026, 8, 7, 12, 34, 56, tzinfo=UTC)
 
@@ -44,6 +67,137 @@ def test_base_config_resolves_environment_references_and_overrides(tmp_path: Pat
 def test_unknown_override_is_rejected() -> None:
     with pytest.raises(ConfigLoadError, match="config에 없습니다"):
         load_and_validate_config(BASE_CONFIG, overrides=("training.epohs=2",))
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "message"),
+    [
+        (("training", "max_epochs"), 0, "training.max_epochs"),
+        (("training", "devices"), 2, "training.devices=1"),
+        (("training", "precision"), 16, "training.precision=32"),
+        (
+            ("training", "gradient_accumulation_steps"),
+            0,
+            "training.gradient_accumulation_steps",
+        ),
+        (
+            ("training", "validate_every_n_epochs"),
+            0,
+            "training.validate_every_n_epochs",
+        ),
+        (("optimizer", "name"), "SGD", "optimizer.name"),
+        (("optimizer", "learning_rate"), 0.0, "optimizer.learning_rate"),
+        (("loss", "primary", "name"), "cross_entropy", "loss.primary.name"),
+        (("checkpoint", "save_best", "mode"), "median", "checkpoint.save_best.mode"),
+        (("model_export", "format"), "onnx", "model_export.format"),
+    ],
+)
+def test_execution_config_rejects_values_the_runner_cannot_honor(
+    path: tuple[str, ...], value: object, message: str
+) -> None:
+    config = load_and_validate_config(BASE_CONFIG)
+    target = config
+    for part in path[:-1]:
+        target = target[part]
+    target[path[-1]] = value
+
+    with pytest.raises(ConfigValidationError, match=message):
+        validate_config(config)
+
+
+@pytest.mark.parametrize(
+    ("scheduler", "message"),
+    [
+        ({"enabled": "yes"}, "scheduler.enabled"),
+        ({"enabled": True, "name": "CosineAnnealingLR"}, "scheduler.name"),
+        ({"enabled": True, "name": "ExponentialLR", "gamma": 0.0}, "scheduler.gamma"),
+        (
+            {
+                "enabled": True,
+                "name": "ReduceLROnPlateau",
+                "mode": "median",
+                "factor": 0.5,
+                "patience_epochs": 5,
+                "min_learning_rate": 0.0,
+            },
+            "scheduler.mode",
+        ),
+        (
+            {
+                "enabled": True,
+                "name": "ReduceLROnPlateau",
+                "mode": "min",
+                "factor": 1.0,
+                "patience_epochs": 5,
+                "min_learning_rate": 0.0,
+            },
+            "scheduler.factor",
+        ),
+        (
+            {
+                "enabled": True,
+                "name": "ReduceLROnPlateau",
+                "mode": "min",
+                "factor": 0.5,
+                "patience_epochs": -1,
+                "min_learning_rate": 0.0,
+            },
+            "scheduler.patience_epochs",
+        ),
+        (
+            {
+                "enabled": True,
+                "name": "ReduceLROnPlateau",
+                "mode": "min",
+                "factor": 0.5,
+                "patience_epochs": 5,
+                "min_learning_rate": -1e-6,
+            },
+            "scheduler.min_learning_rate",
+        ),
+    ],
+)
+def test_scheduler_execution_contract_is_validated(
+    scheduler: dict[str, object], message: str
+) -> None:
+    config = load_and_validate_config(BASE_CONFIG)
+    config["scheduler"] = scheduler
+
+    with pytest.raises(ConfigValidationError, match=message):
+        validate_config(config)
+
+
+def test_disabled_scheduler_and_profile_extension_namespaces_are_allowed() -> None:
+    config = load_and_validate_config(BASE_CONFIG)
+    config["scheduler"] = {
+        "enabled": False,
+        "profile_extension": {"custom_schedule": "unused_by_builtin_runner"},
+    }
+    config["training"]["profile_extension"] = {"custom_loop": True}
+    config["optimizer"]["profile_extension"] = {"custom_parameter_group": True}
+    config["loss"]["profile_extension"] = {"custom_objective": True}
+
+    validate_config(config)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "enabled",
+        "log_system_metrics",
+        "log_resolved_config",
+        "log_dataset_manifest",
+        "log_split_manifest",
+        "log_predictions",
+        "log_environment",
+    ],
+)
+def test_mlflow_flags_must_be_booleans(key: str) -> None:
+    config = load_and_validate_config(BASE_CONFIG)
+    config["mlflow"][key] = "false"
+
+    with pytest.raises(ConfigValidationError, match=rf"mlflow\.{key}"):
+        validate_config(config)
 
 
 def test_invalid_split_ratio_is_reported() -> None:
@@ -109,6 +263,33 @@ def test_fusion_requires_pairing_and_both_models() -> None:
     message = str(captured.value)
     assert "data.pairing.enabled" in message
     assert "front/side" in message
+
+
+def test_y_axis_residual_requires_scalar_side_output_contract() -> None:
+    config = _dual_view_config()
+    config["fusion"]["enabled"] = True
+
+    with pytest.raises(ConfigValidationError, match=r"delta_y_shape=\[B, 1\]"):
+        config["model"]["side"]["output_contract"] = {
+            "gaze_key": "gaze_xy",
+            "gaze_shape": ["B", 2],
+        }
+        validate_config(config)
+
+
+def test_y_axis_residual_rejects_side_policy_other_than_front_fallback() -> None:
+    config = _dual_view_config()
+    config["model"]["side"]["output_contract"] = {
+        "gaze_key": None,
+        "gaze_shape": None,
+        "delta_y_key": "delta_y_side",
+        "delta_y_shape": ["B", 1],
+    }
+    config["fusion"]["enabled"] = True
+    config["fusion"]["missing_branch_policy"] = "drop"
+
+    with pytest.raises(ConfigValidationError, match="use_available_branch"):
+        validate_config(config)
 
 
 def _dual_view_config() -> dict:

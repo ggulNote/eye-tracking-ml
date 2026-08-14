@@ -1,6 +1,8 @@
 # WebEyeTrack과 호환되는 정면 입력 전처리 설정입니다.
 # 전처리와 입력 계약 검증은 구현되어 있습니다.
-# checkpoint 변환, 모델 실행, 학습과 평가는 아직 구현되지 않았습니다.
+# generic PyTorch 모델 실행·학습·평가는 구현되어 있습니다.
+# 공식 .keras는 data_ver1_smoke profile의 검증된 Keras(torch backend) factory로 실행합니다.
+# generic pretrained.path는 여전히 `.pt`/`.pth` state_dict 전용입니다.
 
 experiment:
   name: front_blazegaze_representation
@@ -102,24 +104,24 @@ data:
 model:
   front:
     enabled: true
-    # 외부 모델 코드와 factory/adapter 연결 위치입니다.
+    # 이 profile은 전처리 계약만 고정합니다. 공식 model factory는 data_ver1_smoke에서 연결합니다.
     source_dir: null
     entrypoint: null
     adapter_entrypoint: null
     compatibility:
-      # 다른 전처리 형식의 입력이 들어오면 오류로 중단합니다.
+      # 실험 호환성 metadata입니다. generic runner가 preprocessing_id를 자동 비교하지 않습니다.
       preprocessing_id: webeyetrack_eye_patch_v1
       official_framework: tensorflow_keras
       on_mismatch: error
     initialization:
-      # [미구현] 향후 변환기가 공식 Keras 모델 전체를 불러옵니다.
-      mode: webeyetrack_checkpoint
+      # 호환성 metadata입니다. 이 mapping 자체는 model을 생성하지 않습니다.
+      # 공식 archive 실행은 webeyetrack_front factory의 init_args에서 경로와 SHA를 받습니다.
+      mode: external_keras_reference
       load_scope: full_model
       importer_entrypoint: null
     pretrained:
-      # WEBEYETRACK_WEIGHTS 환경 변수로 weight 경로를 변경할 수 있습니다.
-      path: "${oc.env:WEBEYETRACK_WEIGHTS,./models/blazegaze_mpiifacegaze.keras}"
-      # 정확한 checkpoint를 고정하려면 SHA-256 값을 입력합니다.
+      # generic loader는 `.pt`/`.pth` state_dict 전용이므로 공식 `.keras`는 여기에 넣지 않습니다.
+      path: null
       sha256: null
       strict: true  # checkpoint의 이름과 shape가 정확히 일치해야 합니다.
     input_contract:
@@ -143,7 +145,7 @@ model:
           unit: cm
           coordinate_system: camera
     output_contract:
-      # [미구현] 모델은 2D 시선, 512차원 embedding과 복원 이미지를 반환합니다.
+      # adapter가 아래 표준 key로 출력 형식을 정규화합니다.
       gaze_key: gaze_xy
       gaze_shape: [B, 2]
       embedding_key: front_embedding
@@ -151,42 +153,44 @@ model:
       reconstruction_key: reconstructed_eye_region
 
 training:
-  # [미구현] representation 학습 epoch 수입니다.
+  # representation 학습 epoch 수입니다.
   max_epochs: 20
 
 optimizer:
-  # [미구현] 참고 논문과 맞춘 Adam 설정입니다.
+  # 참고 논문과 맞춘 Adam 설정입니다.
   name: Adam
   learning_rate: 0.001
   weight_decay: 0.0
 
 scheduler:
-  # [미구현] 매 epoch마다 학습률에 gamma를 곱합니다.
+  # 매 epoch마다 학습률에 gamma를 곱합니다.
   enabled: true
   name: ExponentialLR
   gamma: 0.95
   monitor: null
 
 loss:
-  # [미구현] 세 가지 representation 학습 loss를 같은 가중치로 사용합니다.
+  # generic runner는 primary weighted L2를 실행합니다.
+  # 아래 보조 loss는 custom trainer/adapter가 소비할 수 있는 확장 계약입니다.
   primary:
     name: weighted_l2_xy
     prediction_key: gaze_xy
     target_key: target_gaze_xy
     mask_key: front_gaze_valid
     weight: 1.0
-    sample_weight_key: gaze_region_inverse_frequency
-    # 화면을 30x30으로 나누고 빈도가 낮은 시선 영역의 가중치를 높입니다.
+    # 각 batch에서 화면을 30x30으로 나누고 빈도가 낮은 target의 가중치를 높입니다.
     frequency_grid_size: [30, 30]
     delta: null  # weighted L2에서는 사용하지 않는 공통 계약 필드입니다.
   reconstruction:
-    enabled: true
+    # generic runner에는 없는 custom objective이므로 기본 비활성화합니다.
+    enabled: false
     name: mse
     prediction_key: reconstructed_eye_region
     target_key: front_image
     weight: 1.0
   embedding_consistency:
-    enabled: true
+    # generic runner에는 없는 custom objective이므로 기본 비활성화합니다.
+    enabled: false
     name: gaze_distance_consistency
     embedding_key: front_embedding
     target_key: target_gaze_xy

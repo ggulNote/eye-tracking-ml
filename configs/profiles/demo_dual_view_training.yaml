@@ -1,0 +1,142 @@
+# 합성 dual-view DB에서 전체 Front+Side+Y축 fusion 학습을 검사합니다.
+# 실제 성능이나 BlazeGaze 전처리 품질을 평가하는 설정은 아닙니다.
+
+experiment:
+  name: demo_dual_view_training
+  description: "Synthetic dual-view end-to-end training smoke test"
+  tags:
+    dataset: synthetic_dual_view_demo
+    purpose: training_smoke_test
+
+data:
+  dataset_name: synthetic_dual_view_demo
+  reader:
+    type: generic_csv
+    manifest_path: "${oc.env:DUAL_DEMO_MANIFEST,./.demo/dual_view_training/manifest.csv}"
+    verify_image_exists: true
+    verify_image_shape: true
+    target_bounds_policy: error
+  pairing:
+    enabled: true
+  split:
+    ratios:
+      train: 0.50
+      validation: 0.25
+      test: 0.25
+  dataloader:
+    batch_size: 2
+    num_workers: 0
+    pin_memory: false
+    persistent_workers: false
+
+preprocessing:
+  # 합성 annotation은 MediaPipe 대신 공통 ROI/resize 단계만 검사합니다.
+  face_landmarks:
+    enabled: true
+    source: annotation
+    on_failure: error
+  face_roi:
+    enabled: true
+    source: landmarks_bbox
+    margin_ratio: 0.20
+    keep_full_face: true
+    on_failure: use_full_image
+  background_mask:
+    enabled: false
+  resize:
+    enabled: true
+    size_hw: [64, 64]
+  augment:
+    enabled: false
+  branch_overrides:
+    front:
+      enabled: true
+      representation: synthetic_front_smoke
+    side:
+      enabled: true
+      representation: synthetic_side_smoke
+      face_landmarks:
+        enabled: false
+      face_roi:
+        enabled: false
+      eye_region_warp:
+        enabled: true
+        method: profile90_annotation
+        size_hw: [64, 64]
+        bbox_key: visible_eye_bbox_xyxy
+        eyelid_keypoints_key: visible_eye_keypoints_xy
+        iris_center_key: iris_center_xy
+        head_origin_key: profile_head_origin_xy
+        head_forward_key: profile_head_forward_xy
+        crop_mode: affine
+        landmark_crop_scale_xy: [2.4, 1.2]
+        ear_threshold: 0.10
+        eyelid_tail_indices: [3, 2, 4]
+        bbox_scale_xy: [1.25, 1.50]
+        pad_rgb: [0, 0, 0]
+        on_closed: mark_invalid
+        on_failure: mark_invalid
+      resize:
+        enabled: false
+
+model:
+  front:
+    enabled: true
+    source_dir: null
+    entrypoint: null
+    adapter_entrypoint: null
+    init_args: {embedding_dim: 16}
+    input_contract:
+      image_key: front_image
+      shape: [B, 3, 64, 64]
+      dtype: float32
+      color_order: RGB
+      value_range: [0.0, 1.0]
+    output_contract:
+      gaze_key: gaze_xy
+      gaze_shape: [B, 2]
+      embedding_key: front_embedding
+      embedding_shape: [B, 16]
+  side:
+    enabled: true
+    source_dir: null
+    entrypoint: null
+    adapter_entrypoint: null
+    init_args: {embedding_dim: 16}
+    input_contract:
+      image_key: side_image
+      shape: [B, 3, 64, 64]
+      dtype: float32
+      color_order: RGB
+      value_range: [0.0, 1.0]
+    output_contract:
+      gaze_key: null
+      gaze_shape: null
+      delta_y_key: delta_y_side
+      delta_y_shape: [B, 1]
+      embedding_key: side_embedding
+      embedding_shape: [B, 16]
+
+fusion:
+  enabled: true
+  method: y_axis_residual
+  input_keys: [front.gaze_xy, side.delta_y_side]
+
+training:
+  max_epochs: 2
+  accelerator: cpu
+  early_stopping:
+    enabled: false
+
+scheduler:
+  enabled: false
+
+loss:
+  branch_auxiliary:
+    enabled: true
+    front_weight: 0.5
+    side_weight: 1.0
+
+mlflow:
+  # Makefile의 별도 SQLite DB에 전체 training run을 기록합니다.
+  enabled: true

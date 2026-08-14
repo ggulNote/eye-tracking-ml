@@ -1,10 +1,13 @@
-# Runtime and planned-training dependencies for CPython 3.12.x.
-# These are direct dependencies. After the first end-to-end implementation is
-# verified, export a platform-specific lock file or container digest as well.
+# Runtime and training/evaluation dependencies for CPython 3.12.x.
+# These are direct dependencies. 배포 시 platform-specific lock file 또는
+# container digest를 함께 고정합니다.
 
 torch==2.13.0
 torchvision==0.28.0
 torchmetrics==1.9.0
+# Official WebEyeTrack weights are a backend-neutral Keras v3 archive.
+# The pipeline loads them with KERAS_BACKEND=torch and fine-tunes them via PyTorch.
+keras==3.15.1
 
 numpy==2.5.1
 # MLflow 3.14 requires pandas<3.

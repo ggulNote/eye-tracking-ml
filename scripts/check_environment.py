@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from importlib import metadata
 from pathlib import Path
+
+os.environ.setdefault("KERAS_BACKEND", "torch")
+os.environ.setdefault("KERAS_TORCH_DEVICE", "cpu")
 
 DEPENDENCIES = (
     ("numpy", "numpy"),
     ("torch", "torch"),
     ("torchvision", "torchvision"),
+    ("keras", "keras"),
     ("cv2", "opencv-contrib-python"),
     ("mediapipe", "mediapipe"),
     ("PIL", "Pillow"),

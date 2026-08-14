@@ -11,14 +11,14 @@
 ```
 
 현재 repository는 config validation, generic dual-view CSV reader, canonical manifest,
-subject-wise split, ordered preprocessing, PyTorch Dataset/DataLoader, MLflow preparation
-tracking까지 구현되어 있습니다. model adapter/registry, trainer, loss/metric executor,
-checkpoint와 late-fusion module은 다음 단계입니다.
+subject-wise split, ordered preprocessing, PyTorch Dataset/DataLoader와 MLflow preparation
+tracking에 더해 generic PyTorch model runtime, trainer/evaluator, Y축 residual fusion,
+loss/metric, checkpoint와 MLflow training tracking까지 구현되어 있습니다.
 
-현재 public CLI는 `validate-config`와 `prepare`뿐입니다. `prepare`는 manifest/split과
-재현성 artifact를 만들고 MLflow에 data-preparation run을 기록하지만, Dataset을 순회하거나
-MediaPipe/eye warp를 실행하지는 않습니다. 실제 pixel 전처리는 Dataset item을 읽거나 preview
-script를 실행할 때 수행됩니다.
+public CLI는 `validate-config`, `prepare`, `train`, `evaluate`입니다. `prepare`는
+manifest/split과 재현성 artifact만 만들고, 실제 pixel 전처리는 `train`/`evaluate`가 Dataset을
+순회할 때 실행합니다. 범용 Keras importer는 없지만 공식 WebEyeTrack Front `.keras`는
+SHA 검증된 Keras 3 torch-backend wrapper로 실행할 수 있습니다.
 
 ## 2. 전체 데이터 흐름
 
@@ -30,18 +30,17 @@ flowchart LR
     D --> P["Front/Side preprocessing<br/>(구현)"]
     S --> R["MLflow data-preparation run<br/>(구현)"]
 
-    P -.-> A["Model adapter/import<br/>(미구현)"]
-    A --> B["Front/Side training<br/>(미구현)"]
-    B --> G["Late fusion<br/>(미구현)"]
-    B --> E["Loss/metrics/evaluate<br/>(미구현)"]
+    P --> A["PyTorch model adapter/import<br/>(구현)"]
+    A --> B["Front/Side training<br/>(구현)"]
+    B --> G["Y-axis residual fusion<br/>(구현)"]
+    B --> E["Loss/metrics/evaluate<br/>(구현)"]
     G --> E
-    E --> K[".pt checkpoint/export<br/>(미구현)"]
-    E --> T["MLflow train metrics/models<br/>(미구현)"]
+    E --> K[".pt checkpoint/export<br/>(구현)"]
+    E --> T["MLflow train metrics/models<br/>(구현)"]
 ```
 
-새 webcam/phonecam manifest는 pair validation, paired Dataset과 Front/Side 전처리까지
-사용할 수 있습니다. front/side model 학습과 late fusion은 위 점선 이후의 향후 구현
-범위입니다.
+새 webcam/phonecam manifest에서 Front `(x,y)`와 Side `delta_y`를 학습하고 두 결과를 결합해
+평가·저장할 수 있습니다. 외부 모델은 PyTorch factory와 선택 adapter로 교체합니다.
 
 ## 3. Component 경계
 
@@ -53,11 +52,11 @@ flowchart LR
 | Dataset | 구현 | split row | canonical sample/batch | 정지 이미지 decode와 annotation load |
 | Preprocessor | 구현 | canonical sample | model-ready tensor/metadata | ROI, mask, resize, normalize, train augmentation |
 | Preparation tracker | 구현 | manifest/split 결과 | MLflow preparation run | config·환경·manifest hash와 summary 기록 |
-| Model adapter | 미구현 | canonical batch, raw model | standard branch output | 모델별 입력/출력 차이를 흡수 |
-| Fusion | 미구현 | paired branch outputs | final `gaze_xy` | axis-aware late fusion과 missing-view fallback |
-| Loss/metrics | 미구현 | prediction, target, calibration | scalar/log records | train objective와 단위별 평가 분리 |
-| Trainer/checkpoint | 미구현 | 위 component | optimized states와 `.pt` | epoch/validation/resume/export |
-| Training tracker | 미구현 | train/eval state | MLflow metrics/models | loss·metric·checkpoint 기록 |
+| Model runtime/adapter | 구현 | canonical batch, PyTorch model | standard branch output | 동적 import, 입력/출력 변환, state_dict load |
+| Y축 residual fusion | 구현 | Front `gaze_xy`, Side `delta_y_side` | final `gaze_xy` | x 유지, y residual 보정과 invalid-side fallback |
+| Loss/metrics | 구현 | prediction, target, calibration | scalar/log records | train objective와 정규화/pixel/cm 평가 분리 |
+| Trainer/checkpoint | 구현 | 위 component | optimized states와 `.pt` | epoch/validation/resume/export |
+| Training tracker | 구현 | train/eval state | MLflow metrics/models | loss·metric·checkpoint 기록 |
 
 component는 canonical key로만 연결합니다. 예를 들어 dataset이 특정 모델의 positional argument 순서를 알거나, 모델이 source CSV 열을 직접 읽으면 경계를 위반한 것입니다.
 
@@ -77,8 +76,8 @@ optional:
 ```
 
 위 계약은 모델에 독립적인 canonical sample입니다. WebEyeTrack/BlazeGaze용 전처리를
-선택하면 Dataset은 다음 model-ready tensor를 만듭니다. 향후 adapter가 이 tensor를 외부
-모델의 실제 signature로 변환합니다.
+선택하면 Dataset은 다음 model-ready tensor를 만들고 adapter가 외부 PyTorch 모델의 실제
+signature로 변환합니다.
 
 ```text
 front_image:          float32[B,3,128,512]  # CHW 양쪽 눈 homography strip, [0,1]
@@ -91,8 +90,8 @@ target:
 
 공식 TensorFlow `.keras` model은 같은 image를 NHWC `[B,128,512,3]`로 받습니다. 따라서
 CHW/NHWC 변환과 `front_head_vector → head_vector`,
-`front_face_origin_3d → face_origin_3d` key mapping은 향후 model adapter의 책임이며 데이터
-의미를 바꾸는 전처리가 아닙니다.
+`front_face_origin_3d → face_origin_3d` key mapping은 custom adapter의 책임이며 데이터 의미를
+바꾸는 전처리가 아닙니다. 기본 runner 자체는 PyTorch tensor/state_dict만 지원합니다.
 
 ### Paired dual-view batch
 
@@ -104,8 +103,9 @@ target_gaze_xy: float32[B,2]
 ```
 
 두 view는 같은 `pair_id`, subject, gaze target이어야 합니다. 하나가 없는 `branch_only` sample은
-현재 branch별 Dataset에는 남길 수 있습니다. 향후 trainer는 branch loss에는 사용할 수 있지만
-fusion loss/metric에서는 제외해야 합니다.
+prepared manifest와 명시적인 single-view Dataset에는 남길 수 있습니다. 현재 generic dual-view
+runner는 완전한 pair만 Dataset으로 구성하므로, 이 sample을 encoder 학습에 쓰려면 별도의
+Front-only 또는 Side-only runner를 연결해야 합니다.
 
 ### Strict 90° side model-ready sample
 
@@ -123,9 +123,8 @@ target_gaze_xy:      float32[B,2]          # 별도 screen target이 있을 때�
 `resolve_model_forward_keys()`가 `feature_extraction`의 enabled 값에 따라 head, eye-angle,
 iris-pose key를 순서대로 추가하게 합니다. 세 auxiliary feature를 모두 꺼도
 `side_image [B,3,128,256]`는 resolved forward-key 목록에 계속 남습니다.
-현재 구현된 `select_model_forward_inputs(batch, config, "side")`는 resolved key만
-선택합니다. 이 결과를 외부 model signature에 매핑하고 forward를 실행할 adapter는 아직
-구현되지 않았습니다.
+`select_model_forward_inputs(batch, config, "side")`는 resolved key만 선택하고, model
+runtime이 이 결과를 기본 또는 custom adapter를 거쳐 forward에 전달합니다.
 
 `side_headpose.source: side_2d`는 귀 근처 origin에서 코끝으로 향하는 image-plane
 unit vector를 사용합니다. `front_3d`는 paired front의 `front_head_vector`를
@@ -147,18 +146,19 @@ temporal corner `a0=p4`, upper `a1=p3`, lower `a2=p5`에서 `v1=a1-a0`,
 
 ## 5. 외부 모델 adapter
 
-> **구현 상태:** model input contract와 forward-key 선택은 구현되어 있지만, 외부 model을
-> import하고 forward를 실행하는 adapter/registry는 아직 구현되지 않았습니다.
+> **구현 상태:** 외부 PyTorch model factory/adapter 동적 import, 표준 출력 변환과
+> `.pt`/`.pth` state_dict 로딩을 지원합니다. 범용 Keras importer는 없으며 공식 WebEyeTrack
+> Front에 한해 검증된 Keras 3 torch-backend wrapper를 제공합니다.
 
-향후 branch adapter는 모든 모델이 같은 constructor와 output 형식을 갖는다고 가정하지 않고
-다음 세 단계로 차이를 흡수합니다.
+branch adapter는 모든 모델이 같은 constructor와 output 형식을 갖는다고 가정하지 않고 다음
+세 단계로 차이를 흡수합니다.
 
 ```mermaid
 flowchart LR
     B["Canonical batch"] --> I["to_model_inputs()"]
     I --> X["External model forward"]
     X --> O["to_standard_outputs()"]
-    O --> Z["gaze_xy / embedding / uncertainty / quality"]
+    O --> Z["front.gaze_xy / side.delta_y_side / optional embedding"]
 ```
 
 필수 interface의 논리 형태는 다음과 같습니다.
@@ -169,19 +169,29 @@ adapter.to_model_inputs(canonical_batch) -> args/kwargs
 adapter.to_standard_outputs(raw_output) -> dict[str, Tensor]
 ```
 
-향후 runner는 첫 실제 학습 전에 synthetic 또는 한 batch로 다음을 확인해야 합니다.
+Front의 필수 표준 출력은 `gaze_xy [B,2]`, Side residual profile의 필수 출력은
+`delta_y_side [B,1]`입니다.
 
-- input key/shape/dtype/color/value range
-- `gaze_xy` shape `[B,2]`
-- output 좌표계와 `task.coordinate_system` 일치
-- embedding/uncertainty key가 fusion/loss 요구사항을 충족
-- `state_dict` save/load round trip
+runtime은 adapter를 호출하기 전에 실제 canonical batch에서 다음 계약을 확인합니다.
 
-backend와 checkpoint format도 contract 일부입니다. 공식 WebEyeTrack weight는
-TensorFlow/Keras `.keras`이며 현재 pipeline의 기본 backend는 PyTorch입니다. `.keras`를
-경로만 바꾸어 `.pt`처럼 load하지 않습니다. TensorFlow adapter를 추가하거나 변환된
-PyTorch weight를 사용하려면, 공식 전처리 sample에 대해 input과 output의 수치 parity를
-먼저 검증해야 합니다. 공식 loader와 model input은
+- primary image와 선택된 auxiliary input의 key, 선언된 shape/dtype, finite/value range
+- validity가 false인 행에 한해 auxiliary tensor의 NaN sentinel 허용
+- Front `gaze_xy [B,2]`와 Side `delta_y_side [B,1]`의 tensor/shape 계약
+
+`color_order`, 좌표계·단위의 의미, 외부 코드 allowlist, `state_dict` round trip은 runtime이
+자동으로 증명하지 않습니다. 모델·adapter 통합 테스트와 배포 검토에서 별도로 확인해야 합니다.
+
+`entrypoint`가 null이면 image와 선택 auxiliary tensor를 받는 작은 기본 회귀 모델을 만들어
+contract smoke test를 실행할 수 있습니다. 실제 학습 모델을 연결할 때는
+`package.module:callable` factory와 필요 시 adapter를 지정합니다. adapter가 null이면
+`input_contract.forward_keys` 또는 `image_key`를 그대로 모델에 넘기고 Mapping/tensor/tuple
+출력을 표준 key로 정규화합니다.
+
+backend와 checkpoint format도 contract 일부입니다. 공식 WebEyeTrack `.keras`는
+`gaze_pipeline.models.webeyetrack_front:create_model`이 SHA-256과 입력 계약을 검사하고
+Keras 3 torch backend에서 `torch.nn.Module`로 로드합니다. generic `pretrained.path`는 여전히
+`.pt`/`.pth` 전용이며, 다른 `.keras`를 경로만 바꾸어 넣는 범용 변환은 지원하지 않습니다.
+공식 loader와 model input은
 [WebEyeTrack 코드](https://github.com/RedForestAI/WebEyeTrack/blob/14719ad861467c98890058f7c41a94638ae1db2b/python/webeyetrack/blazegaze.py#L255-L351)에서 확인할 수 있습니다.
 
 모델 코드 주소를 config로 바꿀 수 있다는 것은 임의 코드를 안전하게 실행해도 된다는 뜻이 아닙니다. 외부 source, package, checkpoint는 allowlist/commit hash/checksum/license를 기록해야 합니다.
@@ -238,8 +248,7 @@ BlazeGaze input: homography로 정렬한 128×512 양쪽 눈 strip
 EAR은 눈꺼풀 세로 거리 두 개를 가로 길이로 나눈 값이며 공식 threshold는 `0.20`입니다.
 공식 front runtime은 두 눈 중 하나라도 닫히면 예측을 억제합니다. 현재 Dataset은
 닫힌 눈의 target을 `(0,0)`으로 덮지 않고 `gaze_valid=false`로 표시합니다. `(0,0)`이 화면
-중심이라는 정상 label이기 때문입니다. 향후 loss, metric, fusion executor는 이 mask를
-반드시 적용해야 합니다.
+중심이라는 정상 label이기 때문입니다. loss, metric, fusion executor는 이 mask를 적용합니다.
 
 - front binocular: `all_open`
 - side single-eye: `selected_eye_open`
@@ -297,9 +306,8 @@ spatial projection과 prediction head는 다시 초기화합니다. 이를 공�
 exact 재현으로 부르지 않습니다.
 
 single-eye EAR, 선택 눈 index와 `side_gaze_valid`는 encoder feature가 아니라 전처리 진단 및
-향후 loss·metric·fusion validity를 위한 값입니다. 따라서 EAR 값 자체는 resolved model input에
-붙이지 않으며, 향후 runner는 닫힌 눈 sample을 정상 gaze label로 바꾸지 않고 mask로
-제외해야 합니다.
+loss·metric·fusion validity를 위한 값입니다. 따라서 EAR 값 자체는 resolved model input에
+붙이지 않으며, runner는 닫힌 눈 sample을 정상 gaze label로 바꾸지 않고 mask로 제외합니다.
 
 `side_head_pose_2d`는 사진 평면 방향으로 3D head rotation을 대체하지 않습니다.
 `front_head_vector`를 선택하면 paired front와 front metric pose가 필수이며, 값은 front-camera
@@ -310,54 +318,48 @@ camera/screen calibration이 필요합니다.
 예제에서는 `side_example1.jpeg`부터 `side_example5.jpeg`까지 모두 이 strict-profile 경로를
 탑니다.
 
-generic dual-view profile의 `사각형 ROI + black canvas + 224×224`는 임의 backbone을 위한
-baseline으로 유지할 수 있지만 WebEyeTrack front input은 아닙니다. 또한 WebEyeTrack 논문은
-side phonecam이나 late fusion을 제안하지 않았으므로 아래 fusion은 별도 검증이 필요한
-프로젝트 확장입니다.
+기본 `config.yaml`은 `face_roi`와 `background_mask`가 꺼진 source image를 `224×224`로
+letterbox resize하고 `[0,1]`로 정규화합니다. `representation: full_face_black_canvas`는
+설명용 metadata일 뿐 mask stage를 켜지 않습니다. 이 generic 입력은 WebEyeTrack front
+input이 아닙니다. 또한 WebEyeTrack 논문은 side phonecam이나 late fusion을 제안하지
+않았으므로 아래 fusion은 별도 검증이 필요한 프로젝트 확장입니다.
 
-## 7. Late fusion 경계
+## 7. Y축 residual fusion 경계
 
-> **구현 상태:** pair validation, paired Dataset, fusion config dependency 검사는 구현되어
-> 있지만 학습 가능한 fusion module은 구현되지 않았습니다.
+> **구현 상태:** pair validation, paired Dataset과 `y_axis_residual` fusion을 지원합니다.
 
-향후 late fusion의 장점은 각 branch model을 독립적으로 교체·사전학습·평가할 수 있다는
-점입니다.
-
-```text
-front image → front encoder → front gaze, embedding, quality
-                                                       ↘
-                                                        axis-aware gate → final (x,y)
-                                                       ↗
-side image  → side encoder  → side gaze, embedding, quality
-```
-
-axis-aware gate는 x와 y의 가중치를 따로 만듭니다.
+Front는 화면 좌표 `(x_front, y_front)`를 예측하고 Side는 `delta_y_side` 하나만 예측합니다.
+따라서 Side가 수평 좌표를 변경할 수 없습니다.
 
 ```text
-pred_x = w_front_x * front_x + w_side_x * side_x + residual_x
-pred_y = w_front_y * front_y + w_side_y * side_y + residual_y
+front image → front model → (x_front, y_front) ───────────────┐
+                                                               ├─ final (x,y)
+side image  → side model  → delta_y_side → residual weight ───┘
+
+x_final = x_front
+y_final = y_front + w_y * delta_y_side
 ```
 
-가중치는 합이 1이 되도록 softmax로 만들 수 있고, branch embedding, detector quality, uncertainty를 조건으로 받을 수 있습니다. config의 `axis_priors`는 initialization 가설일 뿐이며 learned gate와 branch/fusion validation metric으로 검증합니다.
-
-fusion 전에는 각 branch가 자체 validity를 반환해야 합니다. 닫힌 눈, landmark 실패,
-pose 실패 sample은 해당 branch gate에서 제외합니다. 한 branch만 유효하면
-`missing_branch_policy`를 적용하고, 둘 다 무효면 final prediction도 무효입니다. side의
-`single_eye`와 `full_face` 결과는 각각 별도 run으로 비교한 뒤 하나를 fusion input으로
-선택합니다.
+`fusion.residual_weight`는 `w_y`의 초기값이고 `learnable_weight=true`이면 학습 parameter가
+됩니다. Side annotation/EAR가 무효이거나 pair가 없을 때
+`missing_branch_policy: use_available_branch`는 `delta_y_side=0`으로 처리하여 Front 결과를
+그대로 사용합니다. Side와 pair mask는 residual 및 Side 보조 loss를 gate하고, Front가 유효한
+fallback 결과는 final loss·metric에 남습니다. Front가 무효이면 final prediction을 제외합니다.
 
 ## 8. 학습과 평가의 분리
 
-> **구현 상태:** 아래 항목은 현재 YAML에 선언된 설계 계약이며 계산 executor와 trainer는
-> 아직 구현되지 않았습니다.
+> **구현 상태:** `train`은 optimizer/scheduler/loss, validation과 checkpoint 저장을 실행하고
+> `evaluate`는 지정 checkpoint를 validation 또는 test split에서 평가합니다.
 
-향후 학습 objective와 결과 metric을 같은 것으로 취급하지 않습니다.
+학습 objective와 결과 metric을 같은 것으로 취급하지 않습니다.
 
-- loss: gradient를 만들기 위한 Huber/L1/NLL 등의 differentiable scalar
+- loss: gradient를 만들기 위한 Huber/MSE/weighted L2 scalar
 - selection metric: best checkpoint를 고르는 subject-macro physical cm error
-- report metric: mean/median/p90/p95, x/y MAE, RMSE, OOB, branch/fusion comparison
+- report metric: mean/median/p90/p95, x/y MAE, RMSE와 OOB
 
-metric calculator는 prediction을 clamp하지 않고, participant calibration을 통해 normalized → pixel/mm/cm 변환을 담당합니다. 3D gaze vector task가 추가될 때만 angular error module을 별도로 켭니다.
+metric calculator는 prediction을 clamp하지 않고, participant calibration을 통해 normalized →
+pixel/mm/cm 변환을 담당합니다. Front-only와 fusion은 별도 run의 같은 metric으로 비교합니다.
+현재 2D runner는 angular error를 계산하지 않습니다.
 
 ## 9. 산출물과 lineage
 
@@ -369,20 +371,27 @@ flowchart TD
     A --> M
     B --> M
 
-    T["train/evaluate<br/>(미구현)"] -.-> C["best/last .pt"]
-    T -.-> D["metrics/predictions/reports"]
-    T -.-> E["Git/model lineage"]
-    C -.-> N["MLflow training run"]
-    D -.-> N
-    E -.-> N
+    T["train<br/>(구현)"] --> C["best/last/final .pt"]
+    T --> D["epoch metrics + summary"]
+    T --> E["config/dataset/model lineage"]
+    C --> N["MLflow training run"]
+    D --> N
+    E --> N
+
+    V["evaluate<br/>(구현)"] --> F["split metrics + optional predictions"]
+    V --> G["input checkpoint + lineage"]
+    F --> Q["MLflow evaluation run"]
+    G --> Q
 ```
 
-현재 `prepare`가 만드는 것은 resolved config, manifest/split, 각 hash와 preparation MLflow
-run입니다. 향후 학습 run을 재현하려면 code commit, dirty flag, model weight hash,
-checkpoint, metric까지 추가해야 합니다. checkpoint 하나만 저장해서는 어떤 데이터와
-전처리로 만들어졌는지 재현할 수 없습니다.
+명시적으로 `prepare`를 실행하면 resolved config, manifest/split, 각 hash와 preparation MLflow
+run을 만듭니다. `train`과 `evaluate`도 내부에서 data preparation을 수행하되 별도 preparation
+run을 만들지 않고, 경로를 제거한 config·dataset/split hash를 자신의 run과 checkpoint
+lineage에 연결합니다. training artifact는 `training/checkpoints/{best,last}`와
+`training/model/final`, evaluation artifact는 `evaluation/input_checkpoint`와
+`evaluation/<split>/metrics`, 선택적으로 `evaluation/<split>/predictions`에 기록합니다.
 
-## 10. 구현 상태와 다음 순서
+## 10. 구현 상태와 제한
 
 완료된 data pipeline은 다음과 같습니다.
 
@@ -392,16 +401,16 @@ checkpoint, metric까지 추가해야 합니다. checkpoint 하나만 저장해�
 4. ordered front/side preprocessing executor
 5. single-view/paired Dataset과 config-driven DataLoader
 6. data-preparation MLflow run
+7. external PyTorch model runtime와 adapter
+8. train/evaluate loop, loss·metric, checkpoint/export
+9. Front 고정 x + Side y-residual fusion
+10. MLflow training/evaluation 기록
 
 WebEyeTrack-compatible **front** 계약은 MediaPipe landmark, EAR validity, metric head-pose와
 binocular eye strip을 만들며 Dataset 전처리 executor에 연결되어 있습니다. MediaPipe 기반
 side의 target-eye selection, single-eye/full-face representation은 이 stage를 재사용한
 프로젝트 확장이고, strict 90° side는 별도의 annotation-first visible-eye 계약을 사용합니다.
 `prepare`는 manifest와 split만 생성하므로 실제 MediaPipe/warp/EAR 계산은 Dataset item을
-읽을 때 실행됩니다. 공식 TensorFlow `.keras` model을 실행하는 adapter와 PyTorch weight
-port는 아직 구현 범위가 아닙니다.
-
-다음 구현 순서는 model adapter와 one-batch contract test → front-only trainer/loss/metric
-→ checkpoint/export → 실제 paired data의 side branch → late fusion 및 branch-vs-fusion
-평가입니다. 현재 `fusion.enabled`는 data/pairing 계약을 검증하는 config이며, 학습 가능한
-fusion module이 이미 구현되었다는 뜻은 아닙니다.
+읽는 `train`/`evaluate`에서 실행됩니다. generic state_dict loader는 `.pt`/`.pth`를 대상으로
+하며 공식 Front `.keras`만 별도 wrapper로 지원합니다. 범용 Keras importer, WebEyeTrack의
+first-order MAML stage와 다른 모델의 Keras→PyTorch 변환은 포함하지 않습니다.

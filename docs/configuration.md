@@ -2,25 +2,26 @@
 
 이 문서는 [`../configs/config.yaml`](../configs/config.yaml)의 의미를 설명합니다. YAML의 값은 실행 직전 환경 변수와 CLI override를 반영해 resolve합니다. `prepare`는 그 결과에서 secret을 제거한 `resolved_config.yaml`과 SHA-256 sidecar를 run 폴더에 atomic write합니다. MLflow에는 credential과 machine-local path를 한 번 더 제거한 JSON 사본과 local snapshot의 SHA-256을 기록합니다.
 
-현재 실행 가능한 범위는 config 검증, data preparation, Dataset/DataLoader, front/side 전처리와
-MLflow **data-preparation** 기록입니다. `model` 이후의 adapter, 학습, loss/metric, checkpoint,
-late fusion과 MLflow training 기록은 향후 runner를 위한 선언이며 아직 실행되지 않습니다.
+현재 `validate-config`, `prepare`, `train`, `evaluate`를 실행할 수 있습니다. generic PyTorch
+model adapter, 학습·평가, loss/metric, checkpoint, Y축 residual fusion과 MLflow training
+기록을 지원합니다. 범용 Keras importer는 없지만 공식 WebEyeTrack Front `.keras`용 검증된
+Keras 3 torch-backend factory를 제공합니다.
 
 ## 1. 전체 구조
 
 | 그룹 | 현재 상태 | 역할 |
 |---|---|---|
 | `schema_version`, `experiment` | 구현 | config 버전, run 이름, seed, tag |
-| `paths` | 부분 구현 | data/preparation 경로는 사용; 학습 산출물 경로는 예약 |
+| `paths` | 구현 | data, checkpoint, model, metric, prediction 경로 |
 | `task` | 구현 | target shape와 화면 좌표 계약 |
 | `data` | 구현 | 정지 이미지 reader, view mapping, pairing, split, DataLoader |
 | `preprocessing` | 구현 | 실행 순서가 고정된 전처리 stage와 branch별 override |
-| `model` | 계약만 부분 구현 | I/O와 feature key 검증은 구현; import/forward adapter는 미구현 |
-| `fusion` | 검증만 구현 | pairing/branch 의존성 검사; fusion module은 미구현 |
-| `training`, `optimizer`, `scheduler` | 미구현 | 향후 trainer 설정 |
-| `loss`, `metrics` | 미구현 | 향후 loss/metric executor 설정 |
-| `checkpoint`, `model_export` | 미구현 | 향후 resume/export 정책 |
-| `mlflow` | preparation만 구현 | preparation params/artifact/environment 기록; training 기록은 미구현 |
+| `model` | 구현 | PyTorch factory/adapter import, forward와 state_dict load |
+| `fusion` | 구현 | pairing/branch 검사와 y-axis residual 결합 |
+| `training`, `optimizer`, `scheduler` | 구현 | train loop, Adam/AdamW와 scheduler 설정 |
+| `loss`, `metrics` | 구현 | Huber/MSE/weighted L2와 정규화/pixel/cm metric |
+| `checkpoint`, `model_export` | 구현 | best/last/final `.pt`, resume/export 정책 |
+| `mlflow` | 구현 | preparation 및 training/evaluation params·metric·artifact 기록 |
 
 ## 2. `experiment`와 `paths`
 
@@ -29,10 +30,8 @@ late fusion과 MLflow training 기록은 향후 runner를 위한 선언이며 �
 - `name`: 같은 목적의 run을 묶는 MLflow experiment 및 output 상위 폴더 이름입니다.
 - `run_name`: 개별 실행 이름입니다. 기본값은 experiment 이름과 실행 시각의 조합입니다.
 - `description`: 실험의 가설과 변경점을 사람이 읽을 수 있게 적습니다.
-- `seed`: 현재 subject split, DataLoader shuffle과 augmentation에 전달합니다. 향후 trainer는
-  model 초기화에도 같은 seed를 사용해야 합니다.
-- `deterministic`: 향후 trainer가 결정적 연산을 요청하기 위한 선언입니다. 현재 data
-  split/augmentation 재현성은 `seed`로 보장하며, 이 flag가 별도 학습 backend를 켜지는 않습니다.
+- `seed`: subject split, DataLoader shuffle, augmentation과 model 초기화에 전달합니다.
+- `deterministic`: 지원되는 PyTorch 연산에서 결정적 실행을 요청합니다.
 - `tags`: 실험 설명용 metadata입니다. 현재 preparation tracker의 검색 tag는 별도
   `mlflow.tags`에서 읽으며, 이 값을 학습 로직 변경에 사용하지 않습니다.
 
@@ -40,9 +39,9 @@ late fusion과 MLflow training 기록은 향후 runner를 위한 선언이며 �
 
 - `data_root`: dataset 최상위 경로입니다. tracked YAML에 개인 절대 경로를 넣지 않고 `GAZE_DATA_ROOT`로 override합니다.
 - `output_root`: 모든 run 산출물의 최상위입니다.
-- `run_dir`: 현재 manifest와 resolved config를 저장하는 preparation run 경로입니다.
-- `checkpoint_dir`, `model_dir`: 향후 trainer/checkpoint exporter가 사용할 예약 경로입니다.
-- `metric_dir`, `prediction_dir`, `report_dir`: 향후 평가 runner가 사용할 예약 경로입니다.
+- `run_dir`: manifest, resolved config와 실행 산출물을 저장하는 run 경로입니다.
+- `checkpoint_dir`, `model_dir`: trainer/checkpoint exporter가 사용하는 경로입니다.
+- `metric_dir`, `prediction_dir`: 평가 metric과 prediction 경로입니다.
 
 ## 3. `task`: `[-0.5, 0.5]`와 ReLU의 관계
 
@@ -71,22 +70,26 @@ config는 `normalization_denominator: screen_size`를 사용합니다. 실제 pi
 
 ### 왜 ReLU가 아닌가
 
-이 범위는 activation의 범위가 아니라 **정답 label의 좌표 convention**입니다. 좌표 변환은
-현재 data pipeline에 구현되어 있지만 output activation은 향후 model runner 계약입니다.
+이 범위는 activation의 범위가 아니라 **정답 label의 좌표 convention**입니다.
 
 - ReLU는 음수를 모두 0으로 만들므로 화면 중심보다 왼쪽/위쪽을 표현하지 못합니다.
 - ReLU는 위쪽 상한도 없어서 `[0, 1]` 출력 보장에도 적합하지 않습니다.
-- 향후 기본 회귀 head는 `output_activation: identity`인 linear output을 사용합니다. loss가 예측을 label 범위 근처로 학습시키도록 설계합니다.
-- 반드시 bound가 필요하면 `0.5 * tanh(raw)`인 `scaled_tanh`를 사용할 수 있지만 경계에서 gradient가 작아질 수 있습니다.
+- 기본 fallback 회귀 head는 linear output입니다. loss가 예측을 label 범위 근처로 학습시킵니다.
+- `output_activation`과 `scaled_tanh` 필드는 좌표 계약을 설명하는 metadata이며 현재 generic
+  runner가 activation을 삽입하지 않습니다. bound가 필요하면 외부 model/adapter에서
+  `0.5 * tanh(raw)`를 구현해야 합니다.
 - `[0, 1]` label을 쓰는 설계라면 sigmoid가 수학적으로 맞지만, 이 경우에도 ReLU는 아닙니다.
 
-평가 전에 예측을 강제로 clamp하면 큰 오류가 숨겨지므로 `clamp_for_metrics: false`입니다. 화면 위에 점을 그릴 때만 `clamp_for_visualization: true`를 사용할 수 있습니다.
+평가 전에 예측을 강제로 clamp하면 큰 오류가 숨겨지므로 generic evaluator는 항상 unclamped
+예측을 계산합니다. `clamp_for_metrics`와 `clamp_for_visualization`은 현재 runner가 소비하지
+않는 표시용 계약입니다.
 
 ### 나머지 `task` 필드
 
 - `output_key`, `output_dim`, `output_order`, `output_dtype`: 표준 model output은 `gaze_xy: FloatTensor[B,2]`이고 순서는 `(x,y)`입니다.
 - `origin`, `x_positive_direction`, `y_positive_direction`: 좌표 원점과 축 방향을 명시합니다. 여기서는 중심, 오른쪽 +x, 아래쪽 +y입니다.
-- `uncertainty.enabled`: 모델이 좌표뿐 아니라 불확실성을 학습할지 정합니다. 좌표에 ReLU를 쓰는 것과 무관하며, 양수 표준편차는 softplus, log-variance는 identity로 따로 parameterize합니다.
+- `uncertainty.*`: 향후 uncertainty-aware model/loss를 위한 예약 계약입니다. 현재 generic
+  runner는 uncertainty head나 NLL objective를 만들지 않습니다.
 
 ## 4. `data`: 정지 이미지 reader와 pairing
 
@@ -118,8 +121,11 @@ config는 `normalization_denominator: screen_size`를 사용합니다. 실제 pi
 - `pair_id_key`: manifest에서 ID가 들어 있는 column 이름입니다. 예를 들어 `capture_group`으로 바꾸면 generic reader는 그 header를 요구하고 canonical `pair_id`로 옮깁니다. pairing이 꺼져 있으면 pair column은 없어도 됩니다.
 - `require_same_subject`, `require_same_target`: 잘못된 사람/응시점 간 join을 차단합니다.
 - `max_target_distance_normalized`: target의 수치 허용오차입니다. 동일 label이면 0을 사용합니다.
-- `unpaired_policy: branch_only`: pair 없는 이미지는 encoder 학습에는 쓰되 fusion loss에는 넣지 않습니다.
-- `exclude_unpaired_from_fusion_metrics`: 두 입력이 없는 결과를 fusion 성능으로 계산하지 않습니다.
+- `unpaired_policy: branch_only`: pair 없는 이미지를 prepared manifest에 보존합니다. 명시적인
+  single-view Dataset에서는 사용할 수 있지만 현재 generic dual-view runner는 완전한 pair만
+  구성하므로 encoder 학습에는 별도 Front-only/Side-only runner가 필요합니다.
+- `exclude_unpaired_from_fusion_metrics`: pairing 정책을 설명하는 계약입니다. 현재 dual runner의
+  batch는 완전한 pair만 포함하므로 실행 중 toggle로 동작하지 않습니다.
 
 ### `split`
 
@@ -161,15 +167,16 @@ config는 `normalization_denominator: screen_size`를 사용합니다. 실제 pi
 정합니다. `eye_state.on_closed`는 눈 감김만 따로 `mark_invalid`, `drop`, `error`, `keep` 중
 선택합니다. 기본 WebEyeTrack profile은 닫힌 눈이나 pose 실패의 정답을 `(0,0)`으로 바꾸지
 않고 `front_gaze_valid=false` 또는 `side_gaze_valid=false`로 표시합니다. `(0,0)`도 정상적인
-화면 중심 label이므로 향후 loss와 metric에서 validity mask로 제외해야 합니다. `NaN` pose와
+화면 중심 label이므로 loss와 metric에서 validity mask로 제외합니다. `NaN` pose와
 `False` validity sentinel은 batch shape를 일정하게 유지하기 위한 값이지 유효한 입력이
 아닙니다.
 
 `branch_overrides.front`와 `side`는 같은 stage의 `enabled`와 parameter를 view별로
-덮어씁니다. 기본 dual-view 설정은 양쪽에서 `face_roi.mode=preserve_canvas`와
-`background_mask.method=face_roi_bbox`를 사용하여 원본 위치의 사각형 얼굴 ROI만 남기고,
-측면 ROI margin을 더 크게 둡니다. 타원형 `face_hull`은 선택 기능일 뿐 dual-view 기본값이
-아닙니다. image shape는 parser에 고정하지 않고 각 파일에서 읽으며, crop/resize 시 landmark에도 같은 좌표 변환을 적용합니다.
+덮어씁니다. 기본 `config.yaml`에서는 `face_roi.enabled=false`와
+`background_mask.enabled=false`이므로 source image 전체를 `224×224`로 letterbox resize하고
+`[0,1]`로 정규화합니다. `representation: full_face_black_canvas`는 설명용 metadata이며 그
+이름만으로 ROI/mask가 실행되지 않습니다. image shape는 parser에 고정하지 않고 각 파일에서
+읽으며, crop/resize 시 landmark에도 같은 좌표 변환을 적용합니다.
 
 ### WebEyeTrack/BlazeGaze profile과의 차이
 
@@ -200,9 +207,9 @@ source RGB image
 | 유효성 | checkpoint 입력 아님 | `front_gaze_valid [B]` |
 
 논문은 metric pose를 회전행렬과 이동벡터로 설명하지만 공개 checkpoint는 그 pose matrix를
-펼친 tensor로 받지 않습니다. 실제 보조 입력은 위 표의 두 3차원 vector입니다. 향후 adapter는
-CHW→NHWC와 batch key mapping을 담당하고, 공식 TensorFlow/Keras `.keras`를 현재 PyTorch
-`.pt`처럼 직접 load해서는 안 됩니다. 공식
+펼친 tensor로 받지 않습니다. 실제 보조 입력은 위 표의 두 3차원 vector입니다. 공식 Front
+factory가 CHW→NHWC와 batch key mapping을 담당합니다. `.keras`는 factory의 SHA 검증 경로로만
+로드하며 generic `.pt` state_dict 경로에 넣지 않습니다. 공식
 근거는 [논문](https://arxiv.org/html/2508.19544v1)과
 [eye-patch 구현](https://github.com/RedForestAI/WebEyeTrack/blob/14719ad861467c98890058f7c41a94638ae1db2b/python/webeyetrack/model_based.py#L31-L84),
 [model loader](https://github.com/RedForestAI/WebEyeTrack/blob/14719ad861467c98890058f7c41a94638ae1db2b/python/webeyetrack/blazegaze.py#L255-L351)에서 확인할 수 있습니다.
@@ -211,8 +218,9 @@ front는 양쪽 눈 strip이므로 `required_eye_policy: all_open`을 사용합�
 EAR `< 0.20`이면 기본 `on_closed: mark_invalid`가 적용됩니다. `metric_head_pose`는 annotation
 face center가 있으면 단위를 cm로 바꾸어 사용하고, 없으면 iris diameter `1.20 cm`를 기준으로
 metric face origin을 복원합니다. stage-1 profile은 batch 8, 20 epoch, Adam `1e-3`,
-exponential decay `0.95`, weighted L2 PoG/reconstruction/embedding-consistency loss도 선언하지만
-현재 `prepare` 명령이 이 학습 loop까지 실행한다는 뜻은 아닙니다.
+exponential decay `0.95`와 primary weighted L2 PoG loss를 `train`에 제공합니다.
+reconstruction/embedding-consistency는 확장 계약이며 사용하려면 이를 계산하는 custom
+trainer가 필요합니다. `prepare`는 이 학습 loop를 실행하지 않습니다.
 
 ### Side phonecam profile
 
@@ -315,9 +323,9 @@ side_eye_angles [B,2]
 side_iris_pose_2d [B,2]
 ```
 
-현재 구현된 `select_model_forward_inputs(batch, config, "side")`는 이 key만 선택합니다.
-따라서 toggle을 바꿀 때 별도의 hard-coded input list를 수정하지 않습니다. 선택된 tensor를
-외부 모델에 전달하는 runner/adapter는 아직 구현되지 않았습니다.
+`select_model_forward_inputs(batch, config, "side")`는 이 key만 선택합니다. 따라서 toggle을
+바꿀 때 별도의 hard-coded input list를 수정하지 않습니다. 선택된 tensor는 model runtime과
+adapter가 외부 PyTorch 모델에 전달합니다.
 
 `side_headpose.source: side_2d`는 `profile_head_origin_xy`에서
 `profile_head_forward_xy`(코끝)로 향하는 image-plane unit vector
@@ -327,8 +335,8 @@ branch, front metric-head-pose stage가 모두 필요합니다. 이 3D vector의
 `front_camera`입니다. 두 카메라의 extrinsic 변환이 없으면 side-camera frame vector로
 해석하거나 두 좌표계의 성분을 직접 비교하면 안 됩니다.
 `front_head_orientation_valid=false`이거나 vector가 non-finite이면 기본 정책은 model에
-NaN을 넘기지 않고 0 vector로 치환한 뒤 `side_gaze_valid=false`로 표시하는 것입니다. 향후
-loss·metric·fusion은 이 sample을 제외해야 합니다. 이 feature에는 face origin이 필요하지 않으므로
+NaN을 넘기지 않고 0 vector로 치환한 뒤 `side_gaze_valid=false`로 표시합니다.
+loss·metric·fusion은 이 sample을 제외합니다. 이 feature에는 face origin이 필요하지 않으므로
 `front_head_pose_valid`가 아니라 orientation validity만 사용합니다.
 
 `side_eyeangle.enabled: true`이면 temporal corner `a0=p4`, upper neighbor `a1=p3`, lower
@@ -381,8 +389,7 @@ python -m gaze_pipeline validate-config \
 
 `side_ear`, `side_selected_eye_index`, `side_gaze_valid`는 forward input이 아니라 diagnostic 및
 quality 정보입니다. 특히 EAR는 선택 눈의 open/closed 판정에만 사용하고,
-`side_gaze_valid`는 annotation/EAR 품질을 반영하며, 향후 loss·metric·fusion의 mask로
-사용해야 합니다.
+`side_gaze_valid`는 annotation/EAR 품질을 반영하며 loss·metric·fusion의 mask로 사용합니다.
 config의 `input_contract.forward_keys: auto`와 `diagnostics.*.passed_to_model: false`가 이
 경계를 명시합니다.
 
@@ -391,13 +398,13 @@ config의 `input_contract.forward_keys: auto`와 `diagnostics.*.passed_to_model:
 `target_gaze_xy` 대신 사용하거나 gaze metric으로 평가하지 않습니다. 실제 시선 target은
 같은 촬영 시점의 screen target 및 camera/screen calibration에서 별도로 만듭니다.
 
-`model.side.initialization`의 `webeyetrack_encoder_transfer`는 공식 양안 encoder 전체가 한쪽
-눈 입력과 호환된다는 뜻이 아닙니다. `load_scope`에 적힌 convolution/depthwise/batch-norm 중
-shape이 일치하는 layer만 명시적 importer로 옮깁니다. 한쪽 눈 `128×256`의 공간 구조는 공식
-BlazeGaze 양안 `128×512` checkpoint와 정확히 같지 않으므로 `spatial_projection`,
-`gaze_mlp`, `gaze_output`은 다시 초기화합니다. 이는 partial transfer 실험이지 공식 model의
-exact 재현이 아닙니다. 현재 `importer_entrypoint: null`이면 실제 weight import가 실행되는
-상태가 아니며, importer와 공식 sample parity test를 구현한 뒤 켜야 합니다.
+`model.side.initialization`과 `compatibility`는 transfer 실험을 설명하는 metadata이며 generic
+runner가 자동으로 소비하거나 비교하지 않습니다. `webeyetrack_encoder_transfer`는 공식 양안
+encoder 전체가 한쪽 눈 입력과 호환된다는 뜻이 아닙니다. 별도 변환 도구를 구현한다면
+convolution/depthwise/batch-norm 중 shape이 일치하는 layer만 옮기고, 공간 구조에 의존하는
+`spatial_projection`, `gaze_mlp`, `gaze_output`은 다시 초기화해야 합니다. 이 과정에는 공식
+sample parity test가 필요하며, generic runner에 importer entrypoint만 적는 것으로 실행되지
+않습니다.
 
 논문의 stage 2 first-order MAML은 subject별 support/query episode와 별도 optimizer loop가
 필요하므로 이 stage-1 profile이 자동으로 재현한다고 보지 않습니다. side phonecam과 late
@@ -405,18 +412,21 @@ fusion 역시 WebEyeTrack이 검증한 기능이 아닙니다.
 
 ## 6. `model`: 어떤 PyTorch 모델도 연결하는 계약
 
-> **구현 상태:** model I/O contract 검증과 forward-key 선택만 구현되어 있습니다. 외부 model
-> import, checkpoint load, adapter forward와 output 표준화는 아직 구현되지 않았습니다.
+> **구현 상태:** external PyTorch model/adapter import, forward, 표준 출력 변환과
+> `.pt`/`.pth` state_dict load를 지원합니다. 공식 WebEyeTrack Front에는 별도 `.keras`
+> wrapper가 있으며 그 외 Keras 모델의 범용 importer는 지원하지 않습니다.
 
-`backend`는 향후 checkpoint와 tensor adapter의 기본 실행환경입니다. 각 branch가 최종적으로
-제공해야 할 항목은 다음 네 가지입니다.
+`backend: pytorch`가 model runtime과 checkpoint 형식을 정합니다. 각 branch는 다음 항목으로
+외부 모델을 연결합니다.
 
 1. `source_dir`: repository 외부 모델 코드가 있는 선택 경로. package로 설치되어 있으면 null이어도 됩니다.
 2. `entrypoint`: 예: `my_model.factory:create_model`처럼 import 가능한 factory 주소입니다.
 3. `init_args`: factory에 넘길 모델별 config입니다. 공통 pipeline schema 밖의 임의 인자는 여기만 허용합니다.
 4. `adapter_entrypoint`: pipeline batch를 모델 인자로 바꾸고 model-specific 출력을 표준 key로 변환합니다.
 
-`pretrained.path`, `sha256`, `strict`는 초기 weight의 위치, 무결성, key 일치 정책입니다. 외부 코드/weight는 출처와 라이선스를 확인해야 합니다.
+`pretrained.path`, `sha256`, `strict`는 PyTorch state_dict의 위치, 무결성, key 일치 정책입니다.
+`.keras`를 이 필드에 지정하면 오류로 중단합니다. 공식 Front는 `entrypoint`의 `init_args`에
+weight 경로와 고정 SHA를 전달합니다. 외부 코드/weight는 출처와 라이선스를 확인해야 합니다.
 
 ### 입력 계약
 
@@ -434,22 +444,30 @@ range: [0, 1]
 
 ### 출력 계약
 
-최소 출력은 `gaze_xy: [B,2]`입니다. late fusion을 사용하려면 각 branch가 `front_embedding` 또는 `side_embedding`도 반환합니다. embedding 차원은 branch마다 달라도 되지만 fusion module의 init args가 이를 알아야 합니다. 불확실성은 별도 output key로 정의합니다.
+Front의 최소 출력은 `gaze_xy: [B,2]`입니다. Side residual profile의 최소 출력은
+`delta_y_side: [B,1]`이고 전체 `(x,y)`를 반환하지 않습니다. embedding과 uncertainty는 선택
+출력입니다.
 
-모델 주소만 바꿔서 학습하려면 runner가 import 전에 다음을 검증해야 합니다.
+모델 runtime은 실제 canonical batch에서 다음을 검증합니다.
 
-- source/entrypoint 존재 및 허용된 코드인지
-- model factory가 `init_args`를 받는지
-- synthetic batch의 input/output contract
-- task 좌표계와 model output 좌표계가 일치하거나 adapter가 명시적으로 변환하는지
+- primary image와 resolved `forward_keys`의 key 존재 여부
+- input contract에 선언된 shape/dtype, finite/value range
+- validity가 false인 행에 한한 auxiliary NaN sentinel
+- adapter가 반환한 Front `gaze_xy [B,2]` 또는 Side `delta_y_side [B,1]`
 
-## 7. `fusion`: late fusion
+`color_order`, 좌표계·단위 의미, 외부 코드의 신뢰성, model factory 인자 전체와 state-dict
+round trip은 자동 검증 범위가 아닙니다. 모델·adapter 통합 테스트에서 별도로 확인합니다.
 
-> **구현 상태:** `fusion.enabled=true`일 때 pairing과 두 branch 의존성을 검사하는 config
-> validation만 구현되어 있습니다. fusion module과 학습 코드는 아직 없습니다.
+`adapter_entrypoint: null`이면 runner가 `forward_keys` 또는 `image_key`를 모델에 전달하고
+Mapping/tensor/tuple 출력을 표준화합니다. model signature나 출력 형식이 다르면 adapter가
+`to_model_inputs(batch)`와 `to_standard_outputs(raw_output)`을 구현해야 합니다.
 
-향후 late fusion은 front/side encoder가 각각 예측 또는 embedding을 만든 **뒤**에 결합합니다.
-early fusion처럼 두 이미지를 channel 방향으로 바로 붙이지 않습니다.
+## 7. `fusion`: Y축 residual 보정
+
+> **구현 상태:** `fusion.enabled=true`, `method: y_axis_residual`일 때 paired Front/Side
+> 출력을 학습·평가 loop에서 결합합니다.
+
+Front가 기준 좌표를 예측하고 Side가 y축 residual만 예측합니다.
 
 `enabled: true`로 바꾸기 위한 전제는 다음과 같습니다.
 
@@ -460,46 +478,60 @@ model.side.enabled = true
 명시적 pair_id가 있는 dual-view manifest 존재
 ```
 
-- `stage: late`: branch별 표현 생성 후 결합함을 뜻합니다.
-- `method: axis_aware_gated`: x/y축마다 front와 side의 신뢰도를 다르게 학습합니다.
-- `entrypoint`: custom fusion module factory입니다.
-- `input_keys`: branch prediction/embedding 중 fusion이 읽는 표준 key입니다.
-- `output_key`, `output_shape`: 최종 `(x,y)` 계약입니다.
-- `axis_priors`: 학습 시작 시의 축별 가중치 prior입니다. 고정된 진실이 아니며 validation으로 검증합니다.
-- `learnable_gate`: sample별 gate를 학습할지 정합니다.
-- `use_quality`, `use_uncertainty`: detector quality나 predicted uncertainty를 gate 입력으로 쓸지 정합니다.
-- `missing_branch_policy`: 한 view가 없을 때 available branch로 fallback할지, sample을 버릴지 정합니다.
+```text
+x_final = x_front
+y_final = y_front + w_y * delta_y_side
+```
 
-예를 들어 정면 모델이 수평 방향에 강하고 측면 모델이 수직 residual에 도움을 준다는 가설이라면 x gate는 front 비중을 높게 시작할 수 있습니다. 이 수치는 논문에서 자동으로 보장되는 값이 아니므로 branch-only와 fusion metric을 같이 보고 판단해야 합니다.
+- `stage: late`: branch별 forward 뒤에 결합합니다.
+- `method: y_axis_residual`: x는 Front 값을 그대로 사용하고 y만 보정합니다.
+- `input_keys`: `[front.gaze_xy, side.delta_y_side]`입니다.
+- `residual_weight`: `w_y` 초기값입니다.
+- `learnable_weight`: `w_y`를 optimizer가 갱신할지 정합니다.
+- `output_key`, `output_shape`: 최종 `gaze_xy [B,2]` 계약입니다.
+- `missing_branch_policy: use_available_branch`: Side가 무효면 `delta_y_side=0`으로 두어 Front
+  좌표를 그대로 사용합니다.
 
 ## 8. 학습, optimizer, scheduler, loss
 
-> **구현 상태:** 이 section은 향후 trainer 계약입니다. 현재 CLI에는 `train`이 없으며 아래
-> 값을 소비하는 optimizer/scheduler/loss executor도 없습니다.
+> **구현 상태:** `train`이 아래 설정으로 epoch/validation loop를 실행합니다.
 
 ### `training`
 
 - `max_epochs`: 전체 train dataset 반복 횟수입니다.
-- `accelerator`, `devices`: CPU/CUDA/MPS 자동 선택과 device 수입니다.
-- `precision`: 기본 32-bit. mixed precision을 사용할 때 `16-mixed` 또는 구현이 허용한 enum으로 변경합니다.
+- `accelerator`: `auto`, `cpu`, `cuda`, `mps` 중 하나입니다. `auto`는 CUDA, MPS, CPU 순으로
+  사용 가능한 장치를 고릅니다.
+- `devices`: 현재 정확히 `1`만 지원합니다.
+- `precision`: 현재 정확히 `32`만 지원합니다.
 - `gradient_accumulation_steps`: 여러 mini-batch gradient를 모아 effective batch를 키웁니다.
 - `gradient_clip_norm`: exploding gradient 방지를 위한 전체 norm 상한입니다.
-- `log_every_n_steps`, `validate_every_n_epochs`: logging/validation 주기입니다.
-- `sanity_validation_batches`: 본 학습 전에 validation pipeline을 몇 batch 확인할지 정합니다.
-- `early_stopping`: monitor metric 개선이 `patience_epochs` 동안 없으면 중지합니다. cm calibration이 없는 dataset profile에서는 `metrics.selection_metric`을 fallback normalized metric으로 override합니다.
+- `validate_every_n_epochs`: validation 주기입니다.
+- `early_stopping.enabled`, `patience_epochs`, `min_delta`: 선택 metric 개선이 없을 때의 조기 종료를
+  제어합니다. metric은 `metrics.selection_metric`에서 고르고 없으면
+  `fallback_selection_metric`을 사용하며, 방향은 `checkpoint.save_best.mode`를 따릅니다.
+
+별도 `monitor` 문자열은 사용하지 않습니다. selection metric은 `metrics`와
+`checkpoint.save_best.mode`에서 하나로 정합니다.
 
 ### `optimizer`, `scheduler`
 
-AdamW의 `learning_rate`, `weight_decay`, `betas`를 config에서 바꿉니다. ReduceLROnPlateau는 validation metric이 개선되지 않을 때 LR에 `factor`를 곱하고 `min_learning_rate` 아래로 내리지 않습니다. scheduler의 monitor와 checkpoint/early stopping monitor는 같은 단위인지 확인해야 합니다.
+Adam/AdamW의 `learning_rate`, `weight_decay`, `betas`를 config에서 바꿉니다.
+`ReduceLROnPlateau`는 validation metric이 개선되지 않을 때 LR에 `factor`를 곱하고,
+`ExponentialLR`은 epoch마다 `gamma`를 적용합니다. plateau scheduler는 runner가 선택한 같은
+selection metric을 사용하며 `scheduler.monitor`를 별도로 해석하지 않습니다.
 
 ### `loss`
 
-기본 `huber_xy`는 작은 오차에 L2처럼, 큰 outlier에는 L1처럼 동작합니다. `delta`는 centered-normalized 좌표 단위이고 `axis_weights`로 x/y 중요도를 조절합니다. `uncertainty_nll`은 모델이 분산을 함께 예측할 때만 켭니다. `branch_auxiliary`는 fusion을 학습하면서 각 encoder의 독립 예측도 유지할 때 사용합니다.
+primary loss로 `huber_xy`, MSE와 `weighted_l2_xy`를 지원합니다. 기본 `huber_xy`는 작은 오차에 L2처럼, 큰
+outlier에는 L1처럼 동작합니다. `delta`는 centered-normalized 좌표 단위이고
+`axis_weights`로 x/y 중요도를 조절합니다. validity mask가 false인 sample은 loss에서
+제외합니다. `branch_auxiliary`의 Front/Side 가중치는 지원하지만, standalone L1, uncertainty
+NLL, reconstruction, embedding-consistency objective는 현재 generic runner에 없습니다.
 
 ## 9. 결과 metric
 
-> **구현 상태:** 아래 값은 향후 평가 계약입니다. 현재 pipeline은 prediction metric을
-> 계산하거나 best checkpoint를 선택하지 않습니다.
+> **구현 상태:** validation과 `evaluate`가 정규화 metric을 계산하고, 화면 metadata가 있을 때
+> pixel/cm metric도 함께 계산합니다. 선택 metric으로 best checkpoint를 갱신합니다.
 
 2D 화면 응시점 모델의 sample 오차는 다음과 같이 계산합니다.
 
@@ -526,25 +558,33 @@ pixel metric은 각각 screen width/height pixel을 곱해 같은 방식으로 �
 - normalized RMSE
 - cm error p90/p95
 - out-of-bounds prediction 비율
-- sample-micro와 subject-macro 집계
-- `front/*`, `side/*`, `fusion/*` namespace별 같은 metric
+- sample 평균과 subject-macro Euclidean 집계
 
-평균만 있으면 일부 큰 오류를 보기 어려워 percentile을 함께 남깁니다. fusion 성능은 반드시 각 branch 단독 결과와 비교합니다.
+평균만 있으면 일부 큰 오류를 보기 어려워 percentile을 함께 남깁니다. 현재 generic
+evaluator는 최종 `gaze_xy` metric을 기록합니다. Front-only 실험과 fusion 실험을 별도 run으로
+실행하면 같은 metric으로 직접 비교할 수 있습니다.
 
-`angular_error_deg`는 새 DB에 `gaze_target_3d`와 `face_center_3d`가 있고 모델이 3D gaze direction을 예측할 때만 켭니다. screen `(x,y)` 회귀의 기본 metric으로 angular error를 섞지 않습니다.
+`angular_error_deg`는 새 DB에 `gaze_target_3d`와 `face_center_3d`가 있는 향후 3D task용 확장
+계약이며 현재 2D runner는 계산하지 않습니다. screen `(x,y)` 회귀 metric에 angular error를
+섞지 않습니다.
 
 ## 10. Checkpoint 저장 위치와 `.pt` 대 `.pkl`
 
-> **구현 상태:** checkpoint/export runner가 아직 없으므로 아래 파일은 현재 생성되지
-> 않습니다. 형식과 경로는 향후 구현 시 지켜야 할 계약입니다.
+> **구현 상태:** `train`이 아래 state_dict 기반 파일을 저장하고 `evaluate`가 checkpoint를
+> 불러옵니다.
 
 ### 저장 디렉터리
 
 `checkpoint.dir`는 `${paths.run_dir}/checkpoints`, 최종 추론 weight는 `${paths.run_dir}/models`입니다. 둘을 나누는 이유는 다음과 같습니다.
 
-- `best_weights.pt`: validation 선택 metric이 가장 좋은 model `state_dict`만 저장, 추론용
-- `last_checkpoint.pt`: model뿐 아니라 optimizer/scheduler/scaler, epoch/step, best metric, RNG, config/dataset hash를 저장, 학습 재개용
-- `final_weights.pt`: 종료 시점에 export한 weight와 resolved config/model contract 묶음
+- `best_weights.pt`: `format_version`, epoch, component state, metric, 안전한 model contract와
+  path-free lineage hash를 저장합니다. optimizer/scheduler/RNG는 넣지 않습니다.
+- `last_checkpoint.pt`: 같은 공통 payload에 config로 선택한 optimizer/scheduler/RNG state를
+  더하는 학습 재개용 파일입니다.
+- `final_weights.pt`: 종료 시점의 component state, 선택적인 안전한 model contract와 lineage
+  hash를 저장합니다. raw resolved config 자체는 넣지 않습니다.
+
+현재 generic runner는 단일 best/last/final 파일을 저장합니다.
 
 ### 형식 선택
 
@@ -556,19 +596,27 @@ pixel metric은 각각 screen width/height pixel을 곱해 같은 방식으로 �
 
 ## 11. MLflow
 
-현재 구현은 `prepare`가 만드는 **data-preparation run**만 기록합니다.
+명시적으로 실행한 `prepare`는 **data-preparation run**, `train`과 `evaluate`는 각각 별도의
+training/evaluation run을 기록합니다. `train`/`evaluate` 내부의 data preparation은 추가
+preparation run을 만들지 않고 경로를 제거한 config·dataset/split hash를 현재 run과
+checkpoint lineage에 연결합니다.
 
 - `tracking_uri`: 기본은 MLflow 3.14 호환 local SQLite `sqlite:///./mlflow.db`입니다. 팀 server에서는 환경 변수로 바꿉니다. deprecated filesystem tracking URI인 `file:./mlruns`는 사용하지 않습니다.
 - `experiment_name`, `run_name`: config와 output 폴더 naming을 맞춥니다.
 - `log_system_metrics`: CPU/GPU/memory 사용량을 기록합니다. 기본값 `true`에 필요한 `psutil`은 runtime requirements에 포함됩니다.
-- `log_resolved_config`: 실제 사용된 override 중 credential과 로컬 경로를 제거한 JSON 사본 및 local YAML의 hash를 저장합니다.
+- `log_resolved_config`: credential과 로컬 경로를 제거한 JSON 사본을 저장하고, local resolved YAML의 hash sidecar를 preparation artifact로 기록합니다.
 - `log_dataset_manifest`, `log_split_manifest`: 어떤 image가 어느 split에 들어갔는지 고정합니다.
 - `log_environment`: Python/platform과 설치된 주요 package version을 기록합니다.
 - `tags`: schema, data mode, pairing strategy처럼 run 검색에 필요한 작은 문자열입니다.
 
-현재는 model weight와 checkpoint를 log하지 않습니다. 향후 training tracker는 Git
-commit/dirty 여부, resolved config SHA-256, dataset/split hash, model weight SHA-256,
-loss/metric과 best/last checkpoint를 별도 training run에 기록해야 합니다.
+training tracker는 flattened training/model/fusion 설정, epoch별 `train/loss`, `val/loss`,
+정규화/pixel/cm metric과 best/last checkpoint 및 final model artifact를 기록합니다. artifact
+경로는 `training/checkpoints/{best,last}`, `training/model/final`, `training/summary`입니다.
+
+evaluation run은 `<split>/loss`와 `<split>/<metric>`을 기록하고 입력 checkpoint를
+`evaluation/input_checkpoint`, metric JSON을 `evaluation/<split>/metrics`에 보관합니다. 로컬
+prediction CSV는 항상 생성하지만 MLflow 업로드는 `mlflow.log_predictions=true`일 때만 하며,
+이때 `subject_id`를 제거한 사본만 `evaluation/<split>/predictions`에 기록합니다.
 
 API token/password/secret/credential과 tracking URI의 userinfo·민감 query/fragment는 local
 snapshot 전에 `<redacted>`로 치환합니다. `dataset_manifest_hash`는 path를 포함한
