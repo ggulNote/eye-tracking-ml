@@ -358,8 +358,9 @@ diagnostic 값도 모델 입력이 아니며, validity 값은 loss·metric·fusi
 
 Side factory의 출력은 `delta_y_side [B,1]`, `side_embedding [B,256]`과 optional
 `quality [B,1]`입니다. `delta_y_side`는 Front y에 더하는 centered-normalized residual이며
-Side model은 독립적인 x 좌표를 출력하지 않습니다. 두 구현의 entrypoint, 직접 실행법과
-converter 사용법은 [Side Encoder 문서](docs/side-encoders.md)를 참고하세요.
+Side model은 독립적인 x 좌표를 출력하지 않습니다. 빠른 사용법은
+[Side model package README](src/gaze_pipeline/models/side/README.md), 상세 contract와 converter
+설명은 [Side Encoder 문서](docs/side-encoders.md)를 참고하세요.
 
 Side 이미지 ROI는 항상 생성되고 아래 feature만 config로 선택합니다.
 
