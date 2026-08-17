@@ -21,6 +21,7 @@ class FlashProtocolConfig:
 @dataclass(frozen=True)
 class CameraDetectionConfig:
     roi_norm: Tuple[float, float, float, float]
+    roi_candidates: Tuple[Tuple[float, float, float, float], ...]
     min_brightness_change: float
 
 
@@ -93,17 +94,36 @@ def _bgr(value: Any, name: str) -> Tuple[int, int, int]:
 
 def _camera_detection(raw: Dict[str, Any], name: str) -> CameraDetectionConfig:
     section = "detection.cameras.%s" % name
-    roi_raw = _required(raw, "roi_norm", section)
-    if not isinstance(roi_raw, list) or len(roi_raw) != 4:
-        raise ValueError("%s.roi_norm must contain x0, y0, x1, y1." % section)
-    roi = tuple(float(value) for value in roi_raw)
-    x0, y0, x1, y1 = roi
-    if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
-        raise ValueError("%s.roi_norm must be ordered within [0, 1]." % section)
+    roi = _roi(_required(raw, "roi_norm", section), "%s.roi_norm" % section)
+    candidates_raw = raw.get("roi_candidates", [])
+    if not isinstance(candidates_raw, list):
+        raise ValueError("%s.roi_candidates must be a list." % section)
+    candidates = [roi]
+    for index, value in enumerate(candidates_raw):
+        candidate = _roi(
+            value,
+            "%s.roi_candidates[%d]" % (section, index),
+        )
+        if candidate not in candidates:
+            candidates.append(candidate)
     threshold = float(_required(raw, "min_brightness_change", section))
     if threshold <= 0:
         raise ValueError("%s.min_brightness_change must be positive." % section)
-    return CameraDetectionConfig(roi_norm=roi, min_brightness_change=threshold)
+    return CameraDetectionConfig(
+        roi_norm=roi,
+        roi_candidates=tuple(candidates),
+        min_brightness_change=threshold,
+    )
+
+
+def _roi(value: Any, name: str) -> Tuple[float, float, float, float]:
+    if not isinstance(value, list) or len(value) != 4:
+        raise ValueError("%s must contain x0, y0, x1, y1." % name)
+    roi = tuple(float(item) for item in value)
+    x0, y0, x1, y1 = roi
+    if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
+        raise ValueError("%s must be ordered within [0, 1]." % name)
+    return roi
 
 
 def load_latency_config(path: Path) -> LatencyConfig:

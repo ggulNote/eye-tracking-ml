@@ -4,66 +4,88 @@
 
 ## 저장 원칙
 
-- 익명 참가자 ID는 `p00`부터 `p99`까지 사용합니다.
-- 참가자 한 명은 한 번만 촬영합니다.
+- 실행 시작 시 입력한 참가자 이름을 최상위 폴더명과 CSV 참가자 값으로 사용합니다.
+- 한 참가자는 `neutral`, `head_up`, `head_down` 자세를 각각 한 번 촬영합니다.
 - 이미 수집 결과가 있는 참가자 폴더는 덮어쓰지 않습니다.
 - 선택한 프로토콜이 여러 개여도 카메라마다 하나의 연속 MP4만 생성합니다.
-- 학습 좌표와 동기화 정보는 하나의 `labels/labels.csv`에 기록합니다.
+- 점당 최종 학습 좌표와 이미지 쌍은 하나의 `labels/labels.csv`에 기록합니다.
+- 동기화용 전체 프레임 기록은 `metadata/frame_log.csv`로 구분합니다.
 - 각 클릭 지점의 안정 구간에서 가장 좋은 프레임 한 쌍만 같은 sample ID로 저장합니다.
 - 프로토콜 구간은 CSV의 `protocol`과 `split`로 구분합니다.
 
 ```text
-p00/
-├── Calibration/                         # latency는 사용, MAT 기하는 2D 모드에서 선택
-│   ├── screenSize.mat
-│   ├── stereoCalibration.mat          # 선택 사항
-│   ├── webcam/
-│   │   ├── Camera.mat
-│   │   └── monitorPose.mat
-│   └── phonecam/
-│       ├── Camera.mat
-│       └── monitorPose.mat
-├── webcam/
-│   ├── capture.mp4
-│   └── timestamps.csv
-├── phonecam/
-│   ├── capture.mp4
-│   └── timestamps.csv
-├── images/
-│   ├── webcam/
-│   │   └── s000000.jpg
-│   └── phonecam/
-│       └── s000000.jpg
-├── labels/
-│   ├── labels.csv
-│   └── image_samples.csv
-├── events/
-│   ├── capture_config.yaml
-│   └── <protocol>.csv
-└── participant.json
+안은제/
+├── neutral/<전체 촬영 데이터>/
+├── head_up/<전체 촬영 데이터>/
+└── head_down/<전체 촬영 데이터>/
 ```
+
+상세 구조와 모든 CSV 열은
+[참가자 데이터 폴더와 CSV 설명](participant-data-layout.md)을 기준으로 합니다.
 
 ## 설치와 실행
 
 ```bash
 make setup-capture
 make list-cameras
-make suggest-participant
 ```
 
 카메라 없이 기본 학습 수집 구조를 검증합니다.
 
 ```bash
-make simulate PARTICIPANT=p00 DATASET_ROOT=/private/tmp/gaze-simulation
+make simulate PARTICIPANT=테스트참가자 HEAD_POSE=neutral DATASET_ROOT=/private/tmp/gaze-simulation
 ```
 
 기본 실행은 전체 dot test를 한 번에 실행합니다. 모든 학습·세로 왕복·평가 점은 참가자 클릭 속도에 따라 시간이 달라지며, 각 점을 허용되는 즉시 확정하면 최소 약 112.2초입니다.
 
+Dot Test 전체 화면은 현재 macOS가 OpenCV에 제공하는 실제 활성
+크기인 `1470x956` 캔버스를 사용합니다. OpenCV의 원본 비율 유지로 여백이
+생기지 않도록 캔버스를 전체 화면에 맞춰 표시합니다. macOS의 화면 해상도
+조절을 바꾸면 캔버스 크기도 달라질 수 있습니다. 실제 수집 전에는 카메라와
+참가자 데이터를 만들지 않는 화면 검사부터 실행합니다.
+
 ```bash
-make collect PARTICIPANT=p00
+make check-display
 ```
 
-실제 점 프로토콜 전에 같은 카메라 연결을 유지한 채 `webcam`과 `phonecam`을 나란히 표시합니다. 두 영상의 역할·구도·초점과 실시간 갱신 여부를 확인하며, 두 카메라 모두 MediaPipe face+iris가 설정된 프레임 수만큼 연속 검출될 때까지 점 테스트로 넘어가지 않습니다. phonecam은 한쪽 눈만 실제로 보여도 되지만, MediaPipe가 얼굴 좌표계를 만들 수 있도록 얼굴 윤곽은 프레임 안에 두어야 합니다. 너무 가까운 눈 단독 crop이나 완전한 90° 측면은 사용할 수 없습니다. `q` 또는 `Esc`로 안전하게 중단할 수 있습니다.
+초록 테두리가 화면 네 면에 모두 닿아야 합니다. 회색 또는 검은 여백이 한쪽에
+보이면 수집하지 말고 `Q` 또는 `Esc`로 닫은 뒤 화면 설정과 캔버스 크기를 다시
+확인합니다.
+
+```bash
+make collect
+# 이름 적어주세요: 안은제
+# headpose를 입력해주세요 [neutral/head_up/head_down]: neutral
+```
+
+입력은 한 번만 받으며, 실행 순서는
+`레이턴시 측정 → Dot Test → 프레임 동기화 → 정면 MediaPipe 특징 추출`입니다.
+레이턴시가 실패하거나 사용자가 중단하면 다음 단계로 넘어가지 않습니다. 결과는
+각 자세 폴더의 `calibration/latency.json`과 `feature_maps/`에 따로 저장됩니다.
+
+## iCloud 공유 폴더 자동 백업
+
+공유 폴더 소유자가 사용자를 `편집 가능` 참여자로 추가하고, Finder의 iCloud Drive에
+해당 폴더가 나타난 뒤 절대 경로를 전달합니다.
+
+```bash
+make collect ICLOUD_BACKUP_ROOT="/Users/ahn-eunje/Library/Mobile Documents/com~apple~CloudDocs/공유폴더이름"
+```
+
+후처리까지 정상 완료된 참가자·head pose만 복사합니다. 임시 폴더로 복사한 뒤 원본과
+복사본의 파일 크기와 SHA-256을 모두 비교하고, 검증이 통과하면 최종 폴더명으로
+변경합니다. 그 뒤 다음 질문에서 `네`를 입력한 경우에만 로컬 head pose 폴더를
+삭제합니다.
+
+```text
+iCloud 복사·검증이 완료되었습니다. 로컬 데이터를 삭제하시겠습니까? [네/아니요]:
+```
+
+`아니요` 또는 Enter를 입력하면 로컬 데이터가 유지됩니다. 기존 iCloud 백업은
+덮어쓰지 않으며, iCloud 서버에 실제 업로드됐는지는 Finder 상태 아이콘으로도
+확인해야 합니다.
+
+실제 점 프로토콜 전에 같은 카메라 연결을 유지한 채 `webcam`과 `phonecam`을 나란히 표시합니다. 정면 webcam은 MediaPipe face+iris가 설정된 프레임 수만큼 연속 검출되어야 통과합니다. phonecam은 MediaPipe를 적용하지 않는 측면 이미지 모델 입력이므로, 한쪽 눈이 선명하고 노출이 적절한지 육안으로 확인합니다. `q` 또는 `Esc`로 안전하게 중단할 수 있습니다.
 
 레이턴시 측정 전에 데이터 저장 없이 같은 검사를 먼저 실행할 수 있습니다.
 
@@ -71,22 +93,24 @@ make collect PARTICIPANT=p00
 make check-cameras
 ```
 
-검사를 통과한 뒤에는 phonecam 위치·줌·해상도·연결 방식을 바꾸지 않고 레이턴시 측정과 점 테스트를 이어서 실행합니다.
+검사를 통과한 뒤에는 phonecam 위치·줌·해상도·연결 방식을 바꾸지 않고
+`make collect`를 실행합니다. 이 명령이 레이턴시 측정부터 촬영 후 전처리까지
+이어 실행합니다.
 
 일부 구간만 개발 테스트할 때는 프로토콜을 명시합니다. 실제 참가자 수집에는 기본 `all`을 사용합니다.
 
 ```bash
-make collect PARTICIPANT=p00 PROTOCOL=evaluation_static_3x6
-make collect PARTICIPANT=p00 PROTOCOL=vertical_click_3col_6row
-make collect PARTICIPANT=p00 PROTOCOL=all
+make collect PARTICIPANT=안은제 HEAD_POSE=neutral PROTOCOL=evaluation_static_3x6
+make collect PARTICIPANT=안은제 HEAD_POSE=head_up PROTOCOL=vertical_click_3col_6row
+make collect PARTICIPANT=안은제 HEAD_POSE=head_down PROTOCOL=all
 ```
 
 기본 `intrinsics_2d` 모드는 장비 공통 폴더의 웹캠·폰캠 `Camera.mat`을 검사하고
-참가자 `Calibration/` 폴더에 복사합니다. 두 파일의 보정 영상 크기가 촬영 설정과
+참가자 `calibration/` 폴더에 복사합니다. 두 파일의 보정 영상 크기가 촬영 설정과
 다르면 수집 전에 실패합니다.
 
 ```bash
-make collect PARTICIPANT=p00
+make collect PARTICIPANT=안은제 HEAD_POSE=neutral
 ```
 
 `fixed_rig_2d`는 명시적으로 렌즈 보정을 끄는 개발용 선택이고,
@@ -96,16 +120,38 @@ make collect PARTICIPANT=p00
 정적 학습·세로 왕복·평가 점에서는 회색 원이 줄어든 뒤 점을 계속 보면서 마우스 왼쪽 버튼을 한 번 클릭합니다. Space 또는 Enter도 같은 확정 입력으로 사용할 수 있습니다. 너무 이른 입력은 무시되며, 확정 뒤 초록 원이 보이는 0.65초 동안에도 점을 계속 봐야 합니다.
 
 실행 중 `Q` 또는 `Esc`를 누르면 파일을 닫고 `participant.json` 상태를 `aborted`로 기록합니다.
-카메라가 `max_identical_frames`보다 오래 동일 프레임을 반환하면 연결 정지로 판단해 즉시 실패 처리합니다. 해당 촬영본을 사용하지 말고 카메라를 다시 연결한 뒤 레이턴시부터 재측정합니다.
+카메라가 순간적으로 프레임을 읽지 못하면 `read_retry_count`와
+`read_retry_delay_ms`에 따라 최대 1초 동안 재시도합니다. 잠깐의 iPhone 연속성
+카메라 끊김은 같은 촬영에서 자동 복구됩니다. 그래도 읽지 못하거나
+`max_identical_frames`보다 오래 동일 프레임을 반환하면 실제 연결 정지로 판단해 실패
+처리합니다. 이 경우에만 카메라를 다시 연결한 뒤 레이턴시부터 재측정합니다.
+
+이름은 한글을 그대로 지원하지만 `/`, `\\`, `:`, 제어문자와 숨김 폴더 형태는
+거부합니다. 같은 이름의 기존 수집 데이터는 덮어쓰지 않습니다. 얼굴 영상과 실명을
+함께 저장하는 경우 직접 식별 정보가 되므로 연구용 별칭 사용을 권장합니다.
+
+head pose는 `neutral`, `head_up`, `head_down`만 허용합니다. 세 자세의 CSV
+`participant` 값은 모두 같은 이름이고 `head_pose` 열만 달라집니다. 같은 사람을
+세 명처럼 나누지 않으므로 학습·평가 분할은 항상 참가자 이름 단위로 수행합니다.
 
 ## 카메라 역할
 
-- `webcam_front`: 모니터 정면 웹캠 → `webcam/`
-- `iphone_left`: 참가자 왼쪽 30–45° iPhone → `phonecam/`
+- `webcam_front`: 모니터 정면 웹캠 → `video/web/`, `images/web/`
+- `iphone_left`: 참가자 왼쪽 30–45° iPhone → `video/phone/`, `images/phone/`
 
 노트북마다 장치 번호가 다를 수 있습니다. `make list-cameras`로 확인하고 `configs/capture.yaml`의 `device_index`만 조정합니다. 역할명은 저장 폴더와 연결되므로 교환하지 않습니다.
 
 ## 프로토콜
+
+### Head pose 조건
+
+- `neutral`: 화면 중앙을 향하고 턱을 자연스럽게 유지
+- `head_up`: 정면 방향은 유지하면서 턱을 약 10도 올림
+- `head_down`: 정면 방향은 유지하면서 턱을 약 10도 내림
+
+각 촬영에서는 입력한 자세를 유지하고 눈만 점을 따라갑니다. 너무 큰 각도로 한쪽
+눈이 가려지거나 phonecam의 한쪽 눈 영상이 사라지지 않게 합니다. 촬영 준비 화면과
+프로토콜 시작 화면에 현재 head pose가 표시됩니다.
 
 ### 전체 순서와 시간
 
@@ -127,7 +173,7 @@ make collect PARTICIPANT=p00
 - 참가자가 마우스 왼쪽 버튼 또는 Space/Enter로 점을 확정합니다.
 - 확정 뒤 0.65초는 `usable=1`인 안정 구간입니다.
 - 이후 0.15초 전환을 거쳐 다음 무작위 점으로 이동합니다.
-- 확정 전 프레임은 원본 MP4와 `labels.csv`에는 남지만 학습 이미지로 저장하지 않습니다.
+- 확정 전 프레임은 원본 MP4와 `metadata/frame_log.csv`에는 남지만 학습 이미지로 저장하지 않습니다.
 
 ### 정적 평가
 
@@ -147,36 +193,21 @@ make collect PARTICIPANT=p00
 
 ## CSV 규격
 
-`labels/labels.csv`의 열은 다음과 같습니다.
-
-```text
-participant,protocol,split,pair,
-display_timestamp,
-webcam_frame,webcam_timestamp,
-phonecam_frame,phonecam_timestamp,
-x_px,y_px,x_norm,y_norm,x_centered,y_centered,
-segment,target,direction,
-confirmation_timestamp,confirmation_offset_ms,usable
-```
-
-- `display_timestamp`: 화면 상태를 갱신한 직후 기록한 Unix 나노초 정수
-- `webcam_timestamp`, `phonecam_timestamp`: 프레임을 받은 Unix 나노초 정수
-- `x_norm`, `y_norm`: 좌상단 `(0,0)`, 우하단 `(1,1)`
-- `x_centered`, `y_centered`: 화면 중심 `(0,0)`, 범위 `[-0.5,0.5]`
-- `confirmation_timestamp`: 정적 점을 클릭/키로 확정한 Unix 나노초
-- `confirmation_offset_ms`: 해당 점이 나타난 후 확정하기까지 걸린 시간
-
-각 카메라의 `timestamps.csv`는 `frame,elapsed_ms,timestamp` 형식입니다. 후속 동기화와 프레임 선택은 MP4 재생 시간이 아니라 이 Unix timestamp를 사용합니다.
+`labels/labels.csv`는 점당 품질 최적 이미지 한 쌍과 정답을 합친 81행의 단일
+학습 라벨입니다. `metadata/frame_log.csv`는 촬영 중 모든 프레임과 화면 상태를
+기록하며 후속 동기화에 사용합니다. 각 카메라의 `timestamps.csv`는
+`frame,elapsed_ms,timestamp` 형식입니다. 후속 동기화와 프레임 선택은 MP4 재생
+시간이 아니라 Unix timestamp를 사용합니다.
 
 ### 논문 참고 이미지 샘플
 
 [MPIIGaze 공식 수집 설명](https://collaborative-ai.org/research/datasets/MPIIGaze/)의 축소되는 회색 원과 참가자 확정 입력 방식을 참고했습니다. 원 연구는 Space 입력을 사용하지만 이 프로젝트는 요청에 맞춰 마우스 왼쪽 버튼도 지원합니다.
 
-`labels/image_samples.csv`는 클릭 한 번당 **가장 좋은 카메라 프레임 쌍 한 개**를 기록합니다. 두 이미지 파일명은 같은 sample ID이며, 원본 MP4의 카메라별 프레임 번호와 timestamp, 표적 좌표, train/evaluation 구분을 함께 저장합니다. 기본 전체 실행은 학습 27개 + 세로 왕복 36개 + 평가 18개이므로 정상 완료 시 카메라별 이미지가 81장입니다.
+`labels/labels.csv`는 클릭 한 번당 **가장 좋은 카메라 프레임 쌍 한 개**를 기록합니다. 두 이미지 파일명은 같은 sample ID이며, 원본 MP4의 카메라별 프레임 번호와 timestamp, 표적 좌표, train/evaluation 구분을 함께 저장합니다. 기본 전체 실행은 학습 27개 + 세로 왕복 36개 + 평가 18개이므로 정상 완료 시 카메라별 이미지가 81장입니다.
 
 후보 선택 우선순위는 OpenCV Haar 기반 눈 열림 증거, 얼굴 검출, Laplacian 선명도, 적정 밝기입니다. 웹캠과 폰캠을 따로 고르면 fusion 시점이 어긋나므로 두 카메라의 합산 품질 점수가 가장 높은 **동일 pair**를 선택합니다. `candidate_count`, 합산 품질 점수와 카메라별 얼굴·눈 검출 수, 선명도, 밝기를 manifest에 남깁니다.
 
-Haar 눈 검출은 특히 30–45° 측면 폰캠, 안경, 강한 반사에서 실패할 수 있으므로 선명도·노출 보조 점수로만 사용합니다. A+B 통합 수집에서는 각 클릭 안정 구간의 모든 후보에 MediaPipe FaceMesh+iris를 적용하고, 두 카메라가 모두 성공한 프레임 쌍을 가장 먼저 선택합니다. 최종 B 전처리는 같은 MediaPipe 계약으로 눈 감김·얼굴 미검출을 다시 판정합니다. 선택 이미지가 탈락해도 원본 MP4와 전체 frame label이 남습니다.
+Haar 눈 검출은 측면 폰캠, 안경, 강한 반사에서 실패할 수 있으므로 선명도·노출과 함께 보조 점수로만 사용합니다. 클릭 안정 구간의 대표 프레임을 고를 때 MediaPipe FaceMesh+iris 성공 점수는 정면 webcam에만 적용합니다. phonecam은 동일 시각의 측면 이미지를 그대로 저장하고 OpenCV 품질 점수만 반영합니다.
 
 모든 CSV 열과 의미는 [CSV 스키마 전체 목록](csv-schemas.md)을 기준으로 합니다.
 
@@ -199,6 +230,10 @@ Haar 눈 검출은 특히 30–45° 측면 폰캠, 안경, 강한 반사에서 �
 
 얼굴 영상은 생체·개인정보에 해당할 수 있으므로 연구 동의, 접근 권한, 암호화, 보관 기간 및 폐기 정책을 먼저 확정해야 합니다. 안경·렌즈, 시력 조건, 주사용 손, 조명, 눈–화면 거리 같은 익명 메타데이터는 `--participant-metadata` JSON으로 전달할 수 있습니다.
 
-현재 모듈은 지속 학습 파이프라인의 **원본 데이터 수집 단계**입니다. `labels.csv`에는 실제 표시 좌표와 `display_timestamp`를 보정 없이 기록합니다. 실제 lag는 별도 레이턴시 측정 단계에서 계산하고, 보정 결과는 원본을 덮어쓰지 않고 별도의 synchronized CSV로 생성합니다. 세부 계약은 [레이턴시·프레임 동기화 문서](latency-sync.md)를 참고합니다.
+현재 모듈은 지속 학습 파이프라인의 **원본 데이터 수집 단계**입니다. 실제 표시
+좌표와 모든 프레임 시각은 `metadata/frame_log.csv`에 보정 없이 기록합니다. 실제
+lag는 별도 레이턴시 측정 단계에서 계산하고, 보정 결과는 원본을 덮어쓰지 않고
+`feature_maps/synchronized.csv`로 생성합니다. 세부 계약은
+[레이턴시·프레임 동기화 문서](latency-sync.md)를 참고합니다.
 
 후속 `ggulnote-video-preprocess`는 점당 하나의 레이턴시 보정 pair에서 MediaPipe 8차원 특징을 추출하고 눈 감김·얼굴 미검출을 표시합니다. 자세한 연결 계약은 [영상 전처리 문서](video-preprocessing-handoff.md)를 참고합니다. 이후 학습 dataset 변환, MLflow 기반 학습·평가·모델 버전 연결이 필요합니다. 평가점은 각 점의 안정 구간 예측값으로 MAE_x, MAE_y, 상·중·하 MAE_y와 predicted-target y 기울기를 계산합니다.

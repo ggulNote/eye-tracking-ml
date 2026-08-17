@@ -22,10 +22,6 @@ SELECTED_SAMPLE_REQUIRED_COLUMNS = frozenset(
         "participant",
         "protocol",
         "split",
-        "webcam_frame",
-        "webcam_timestamp",
-        "phonecam_frame",
-        "phonecam_timestamp",
         "segment",
         "target",
         "direction",
@@ -39,6 +35,7 @@ def load_synchronized_pairs(path: Path) -> Tuple[SynchronizedPair, ...]:
         raise FileNotFoundError("Synchronized CSV does not exist: %s" % resolved)
     pairs: List[SynchronizedPair] = []
     participant: Optional[str] = None
+    head_pose: Optional[str] = None
     seen_pairs = set()
     with resolved.open(encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
@@ -51,6 +48,11 @@ def load_synchronized_pairs(path: Path) -> Tuple[SynchronizedPair, ...]:
                 participant = row_participant
             elif participant != row_participant:
                 raise ContractError("Synchronized CSV must contain one participant.")
+            row_head_pose = (row.get("head_pose") or "").strip()
+            if head_pose is None:
+                head_pose = row_head_pose
+            elif head_pose != row_head_pose:
+                raise ContractError("Synchronized CSV must contain one head_pose.")
             pair = _required_int(row, "pair", row_number, minimum=0)
             if pair in seen_pairs:
                 raise ContractError("Synchronized CSV contains duplicate pair %d." % pair)
@@ -58,6 +60,7 @@ def load_synchronized_pairs(path: Path) -> Tuple[SynchronizedPair, ...]:
             pairs.append(
                 SynchronizedPair(
                     participant=row_participant,
+                    head_pose=row_head_pose,
                     pair=pair,
                     webcam_frame=_optional_int(row, "webcam_frame", row_number, 0),
                     phonecam_frame=_optional_int(row, "phonecam_frame", row_number, 0),
@@ -105,9 +108,22 @@ def load_selected_samples(path: Path) -> Tuple[SelectedSample, ...]:
         _validate_selected_sample_header(reader.fieldnames)
         fieldnames = set(reader.fieldnames or ())
         pair_column = "pair" if "pair" in fieldnames else "pair_frame"
+        web_frame_column = "web_frame" if "web_frame" in fieldnames else "webcam_frame"
+        web_timestamp_column = (
+            "web_timestamp" if "web_timestamp" in fieldnames else "webcam_timestamp"
+        )
+        phone_frame_column = (
+            "phone_frame" if "phone_frame" in fieldnames else "phonecam_frame"
+        )
+        phone_timestamp_column = (
+            "phone_timestamp"
+            if "phone_timestamp" in fieldnames
+            else "phonecam_timestamp"
+        )
         for row_number, row in enumerate(reader, start=2):
             sample_id = (row.get("sample") or "").strip()
             participant = (row.get("participant") or "").strip()
+            head_pose = (row.get("head_pose") or "").strip()
             if not sample_id:
                 raise ContractError("Row %d has an empty sample." % row_number)
             if sample_id in seen_ids:
@@ -118,16 +134,17 @@ def load_selected_samples(path: Path) -> Tuple[SelectedSample, ...]:
             sample = SelectedSample(
                 sample=sample_id,
                 participant=participant,
+                head_pose=head_pose,
                 protocol=row["protocol"],
                 split=row["split"],
                 source_pair=_required_int(row, pair_column, row_number, minimum=0),
-                webcam_frame=_required_int(row, "webcam_frame", row_number, minimum=0),
-                phonecam_frame=_required_int(row, "phonecam_frame", row_number, minimum=0),
+                webcam_frame=_required_int(row, web_frame_column, row_number, minimum=0),
+                phonecam_frame=_required_int(row, phone_frame_column, row_number, minimum=0),
                 webcam_timestamp=_required_int(
-                    row, "webcam_timestamp", row_number, minimum=1
+                    row, web_timestamp_column, row_number, minimum=1
                 ),
                 phonecam_timestamp=_required_int(
-                    row, "phonecam_timestamp", row_number, minimum=1
+                    row, phone_timestamp_column, row_number, minimum=1
                 ),
                 segment=(row.get("segment") or "").strip(),
                 target=(row.get("target") or "").strip(),
@@ -151,7 +168,7 @@ def select_synchronized_samples(
     The selected images were scored before camera-latency correction.  Matching
     within the same protocol/segment keeps the click label fixed, while choosing
     the closest camera frame numbers preserves the quality-selected instant.
-    The returned frames always come from ``synchronized_frames.csv``.
+    The returned frames always come from ``feature_maps/synchronized.csv``.
     """
 
     selected: List[SelectedSynchronizedPair] = []
@@ -162,6 +179,7 @@ def select_synchronized_samples(
             for pair in pairs
             if pair.pair not in used_pairs
             and pair.participant == sample.participant
+            and pair.head_pose == sample.head_pose
             and pair.export_partition == sample.export_partition
             and pair.protocol == sample.protocol
             and pair.segment == sample.segment
@@ -223,6 +241,22 @@ def _validate_selected_sample_header(fieldnames: Optional[Sequence[str]]) -> Non
     if "pair" not in fieldnames and "pair_frame" not in fieldnames:
         raise ContractError(
             "Selected sample CSV is missing columns: pair (or legacy pair_frame)."
+        )
+    alternatives = (
+        ("web_frame", "webcam_frame"),
+        ("web_timestamp", "webcam_timestamp"),
+        ("phone_frame", "phonecam_frame"),
+        ("phone_timestamp", "phonecam_timestamp"),
+    )
+    missing_camera_fields = [
+        "%s (or legacy %s)" % names
+        for names in alternatives
+        if not any(name in fieldnames for name in names)
+    ]
+    if missing_camera_fields:
+        raise ContractError(
+            "Selected sample CSV is missing columns: %s."
+            % ", ".join(missing_camera_fields)
         )
 
 

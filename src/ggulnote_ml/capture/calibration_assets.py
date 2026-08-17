@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 import numpy as np
 from scipy.io import loadmat
@@ -111,8 +111,18 @@ def _inspect_mat(path: Path, required: Iterable[str]) -> Dict[str, Any]:
 def inspect_calibration_assets(calibration_directory: Path) -> Dict[str, Any]:
     """Validate only the variables consumed by the downstream WebEyeTrack-style loader."""
     cameras = {}
-    for directory_name, key in (("webcam", "webcam_front"), ("phonecam", "iphone_left")):
-        camera_directory = calibration_directory / directory_name
+    for directory_names, key in (
+        (("web", "webcam"), "webcam_front"),
+        (("phone", "phonecam"), "iphone_left"),
+    ):
+        camera_directory = next(
+            (
+                calibration_directory / name
+                for name in directory_names
+                if (calibration_directory / name).exists()
+            ),
+            calibration_directory / directory_names[0],
+        )
         cameras[key] = {
             "camera": _inspect_mat(camera_directory / "Camera.mat", CAMERA_REQUIRED),
             "monitor_pose": _inspect_mat(camera_directory / "monitorPose.mat", MONITOR_REQUIRED),
@@ -140,6 +150,7 @@ def copy_calibration_assets(
     source: Path,
     destination: Path,
     relative_paths: Iterable[Path],
+    camera_directory_aliases: Optional[Mapping[str, str]] = None,
 ) -> None:
     """Copy immutable final MAT assets into one participant without overwriting."""
 
@@ -147,11 +158,18 @@ def copy_calibration_assets(
     destination = destination.expanduser().resolve()
     if source == destination:
         return
+    aliases = dict(camera_directory_aliases or {})
     for relative_path in relative_paths:
         source_path = source / relative_path
         if not source_path.is_file():
             continue
-        destination_path = destination / relative_path
+        parts = relative_path.parts
+        destination_relative = (
+            Path(aliases.get(parts[0], parts[0]), *parts[1:])
+            if parts
+            else relative_path
+        )
+        destination_path = destination / destination_relative
         if destination_path.exists():
             raise FileExistsError(
                 "Participant calibration asset already exists: %s" % destination_path

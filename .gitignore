@@ -1,6 +1,7 @@
 .DS_Store
 .venv/
 .env
+Makefile.local
 __pycache__/
 *.py[cod]
 .pytest_cache/

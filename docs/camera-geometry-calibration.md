@@ -47,14 +47,14 @@ checkerboard:
 
 ```yaml
 screen:
-  width_pixel: 1920
-  height_pixel: 1248
+  width_pixel: 1470
+  height_pixel: 956
   width_mm: 290.286
   height_mm: 188.686
   verification_source: apple_official_224ppi
 ```
 
-화면 픽셀 좌표는 dot test의 캔버스와 동일한 `1920x1248`입니다. 물리 화면과 픽셀 좌표의 종횡비가 2%보다 크게 다르면 실행 초기에 오류가 발생합니다.
+화면 픽셀 좌표는 dot test의 캔버스와 동일한 `1470x956`입니다. 물리 화면과 픽셀 좌표의 종횡비가 2%보다 크게 다르면 실행 초기에 오류가 발생합니다.
 
 설정 수정 후 다음 파일을 생성합니다.
 
@@ -100,7 +100,7 @@ make geometry-intrinsics CAMERA=phonecam AUTO_CAPTURE=1
 
 RMS 재투영 오차가 설정의 `max_rms_error_px`보다 크면 `Camera.mat`을 만들지 않습니다.
 
-완성된 두 `Camera.mat`은 실제 수집 시작 시 각 참가자 `Calibration/` 폴더에 자동
+완성된 두 `Camera.mat`은 실제 수집 시작 시 각 참가자 `calibration/` 폴더에 자동
 복사됩니다. B 전처리는 보정 당시 해상도와 원본 MP4 해상도가 정확히 같을 때만
 OpenCV 왜곡 보정을 적용합니다.
 

@@ -442,3 +442,49 @@ def write_protocol_events(path: Path, plan: ProtocolPlan) -> None:
                     int(plan.confirmation_required),
                 ]
             )
+
+
+def write_protocol_manifest(
+    path: Path,
+    plans: Sequence[ProtocolPlan],
+    *,
+    participant: str = "",
+    head_pose: str = "",
+) -> None:
+    """Write every dot-test target to one human-readable protocol table."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(
+            [
+                "participant",
+                "head_pose",
+                "protocol",
+                "split",
+                "segment",
+                "repeat",
+                "target",
+                "x_norm",
+                "y_norm",
+                "direction",
+                "confirmation_required",
+            ]
+        )
+        for plan in plans:
+            for segment in plan.segments:
+                writer.writerow(
+                    [
+                        participant,
+                        head_pose,
+                        plan.protocol_id,
+                        plan.split,
+                        segment.segment_index,
+                        segment.repeat_index,
+                        segment.target_index,
+                        "%.6f" % segment.start_x,
+                        "%.6f" % segment.start_y,
+                        segment.direction,
+                        int(plan.confirmation_required),
+                    ]
+                )

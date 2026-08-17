@@ -21,6 +21,7 @@ from ggulnote_ml.video_preprocessing.mediapipe_landmarks import (
 IMAGE_SAMPLE_COLUMNS = (
     "sample",
     "participant",
+    "head_pose",
     "protocol",
     "split",
     "pair",
@@ -29,24 +30,24 @@ IMAGE_SAMPLE_COLUMNS = (
     "confirmation_offset_ms",
     "candidate_count",
     "pair_quality_score",
-    "webcam_image",
-    "webcam_frame",
-    "webcam_timestamp",
-    "webcam_face_detected",
-    "webcam_eyes_detected",
-    "webcam_mediapipe_face_detected",
-    "webcam_mediapipe_iris_detected",
-    "webcam_sharpness",
-    "webcam_brightness",
-    "phonecam_image",
-    "phonecam_frame",
-    "phonecam_timestamp",
-    "phonecam_face_detected",
-    "phonecam_eyes_detected",
-    "phonecam_mediapipe_face_detected",
-    "phonecam_mediapipe_iris_detected",
-    "phonecam_sharpness",
-    "phonecam_brightness",
+    "web_image",
+    "web_frame",
+    "web_timestamp",
+    "web_face_detected",
+    "web_eyes_detected",
+    "web_mediapipe_face_detected",
+    "web_mediapipe_iris_detected",
+    "web_sharpness",
+    "web_brightness",
+    "phone_image",
+    "phone_frame",
+    "phone_timestamp",
+    "phone_face_detected",
+    "phone_eyes_detected",
+    "phone_mediapipe_face_detected",
+    "phone_mediapipe_iris_detected",
+    "phone_sharpness",
+    "phone_brightness",
     "x_px",
     "y_px",
     "x_norm",
@@ -188,7 +189,7 @@ class FrameSampleWriter:
         self.paths = paths
         self.config = config
         self.display = display
-        self.manifest_path = paths.labels_directory / "image_samples.csv"
+        self.manifest_path = paths.labels_directory / "labels.csv"
         self._sample_index = 0
         self._active_key: Optional[Tuple[str, int, int]] = None
         self._candidate_count = 0
@@ -200,13 +201,18 @@ class FrameSampleWriter:
         self._landmark_extractors = None
         if config.enabled:
             self._scorer = FrameQualityScorer(config)
-            if enable_mediapipe_quality:
+            mediapipe_cameras = (
+                config.mediapipe_quality_cameras
+                if enable_mediapipe_quality
+                else ()
+            )
+            if mediapipe_cameras:
                 factory = landmark_extractor_factory or (
                     lambda _camera: MediaPipeFaceIrisExtractor()
                 )
                 self._landmark_extractors = {
                     camera: self._landmark_stack.enter_context(factory(camera))
-                    for camera in ("webcam", "phonecam")
+                    for camera in mediapipe_cameras
                 }
             self._file = self.manifest_path.open("x", encoding="utf-8", newline="")
             self._writer = csv.DictWriter(self._file, fieldnames=IMAGE_SAMPLE_COLUMNS)
@@ -245,29 +251,29 @@ class FrameSampleWriter:
         webcam_quality = self._scorer.score(webcam.frame)
         phonecam_quality = self._scorer.score(phonecam.frame)
         if self._landmark_extractors is not None:
-            webcam_landmarks = self._landmark_extractors["webcam"].extract(
-                webcam.frame
-            )
-            phonecam_landmarks = self._landmark_extractors["phonecam"].extract(
-                phonecam.frame
-            )
-            webcam_quality = replace(
-                webcam_quality,
-                mediapipe_face_detected=webcam_landmarks.face_detected,
-                mediapipe_iris_detected=webcam_landmarks.iris_detected,
-            )
-            phonecam_quality = replace(
-                phonecam_quality,
-                mediapipe_face_detected=phonecam_landmarks.face_detected,
-                mediapipe_iris_detected=phonecam_landmarks.iris_detected,
-            )
+            qualities = {"webcam": webcam_quality, "phonecam": phonecam_quality}
+            frames = {"webcam": webcam.frame, "phonecam": phonecam.frame}
+            for camera, extractor in self._landmark_extractors.items():
+                landmarks = extractor.extract(frames[camera])
+                qualities[camera] = replace(
+                    qualities[camera],
+                    mediapipe_face_detected=landmarks.face_detected,
+                    mediapipe_iris_detected=landmarks.iris_detected,
+                )
+            webcam_quality = qualities["webcam"]
+            phonecam_quality = qualities["phonecam"]
         combined_score = (
             webcam_quality.score
             + phonecam_quality.score
             + self.config.mediapipe_ready_weight
-            * (
-                int(webcam_quality.mediapipe_ready)
-                + int(phonecam_quality.mediapipe_ready)
+            * sum(
+                int(
+                    {
+                        "webcam": webcam_quality,
+                        "phonecam": phonecam_quality,
+                    }[camera].mediapipe_ready
+                )
+                for camera in self.config.mediapipe_quality_cameras
             )
         )
         self._candidate_count += 1
@@ -334,6 +340,7 @@ class FrameSampleWriter:
             {
                 "sample": sample_id,
                 "participant": self.paths.participant_id,
+                "head_pose": self.paths.head_pose,
                 "protocol": state.protocol_id,
                 "split": state.split,
                 "pair": candidate.pair_index,
@@ -342,32 +349,32 @@ class FrameSampleWriter:
                 "confirmation_offset_ms": "%.3f" % float(state.confirmation_offset_ms),
                 "candidate_count": self._candidate_count,
                 "pair_quality_score": "%.6f" % candidate.combined_score,
-                "webcam_image": str(webcam_path.relative_to(self.paths.participant_directory)),
-                "webcam_frame": candidate.webcam.frame_index,
-                "webcam_timestamp": candidate.webcam.unix_timestamp_ns,
-                "webcam_face_detected": int(webcam_quality.face_detected),
-                "webcam_eyes_detected": webcam_quality.eyes_detected,
-                "webcam_mediapipe_face_detected": int(
+                "web_image": str(webcam_path.relative_to(self.paths.participant_directory)),
+                "web_frame": candidate.webcam.frame_index,
+                "web_timestamp": candidate.webcam.unix_timestamp_ns,
+                "web_face_detected": int(webcam_quality.face_detected),
+                "web_eyes_detected": webcam_quality.eyes_detected,
+                "web_mediapipe_face_detected": int(
                     webcam_quality.mediapipe_face_detected
                 ),
-                "webcam_mediapipe_iris_detected": int(
+                "web_mediapipe_iris_detected": int(
                     webcam_quality.mediapipe_iris_detected
                 ),
-                "webcam_sharpness": "%.6f" % webcam_quality.sharpness,
-                "webcam_brightness": "%.6f" % webcam_quality.brightness,
-                "phonecam_image": str(phonecam_path.relative_to(self.paths.participant_directory)),
-                "phonecam_frame": candidate.phonecam.frame_index,
-                "phonecam_timestamp": candidate.phonecam.unix_timestamp_ns,
-                "phonecam_face_detected": int(phonecam_quality.face_detected),
-                "phonecam_eyes_detected": phonecam_quality.eyes_detected,
-                "phonecam_mediapipe_face_detected": int(
+                "web_sharpness": "%.6f" % webcam_quality.sharpness,
+                "web_brightness": "%.6f" % webcam_quality.brightness,
+                "phone_image": str(phonecam_path.relative_to(self.paths.participant_directory)),
+                "phone_frame": candidate.phonecam.frame_index,
+                "phone_timestamp": candidate.phonecam.unix_timestamp_ns,
+                "phone_face_detected": int(phonecam_quality.face_detected),
+                "phone_eyes_detected": phonecam_quality.eyes_detected,
+                "phone_mediapipe_face_detected": int(
                     phonecam_quality.mediapipe_face_detected
                 ),
-                "phonecam_mediapipe_iris_detected": int(
+                "phone_mediapipe_iris_detected": int(
                     phonecam_quality.mediapipe_iris_detected
                 ),
-                "phonecam_sharpness": "%.6f" % phonecam_quality.sharpness,
-                "phonecam_brightness": "%.6f" % phonecam_quality.brightness,
+                "phone_sharpness": "%.6f" % phonecam_quality.sharpness,
+                "phone_brightness": "%.6f" % phonecam_quality.brightness,
                 "x_px": x_px,
                 "y_px": y_px,
                 "x_norm": "%.6f" % float(state.target_x),

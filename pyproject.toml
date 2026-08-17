@@ -39,6 +39,7 @@ capture = [
 ggulnote-ml = "ggulnote_ml.cli:main"
 ggulnote-capture = "ggulnote_ml.capture.cli:main"
 ggulnote-video-preprocess = "ggulnote_ml.video_preprocessing.cli:main"
+ggulnote-webeyetrack-preprocess = "ggulnote_ml.video_preprocessing.webeyetrack_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

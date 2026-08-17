@@ -20,7 +20,7 @@ from .protocols import (
     ProtocolPlan,
     ProtocolRunner,
     normalized_coordinates,
-    write_protocol_events,
+    write_protocol_manifest,
 )
 from .recorder import SessionRecorder
 from ggulnote_ml.video_preprocessing.mediapipe_landmarks import (
@@ -31,6 +31,7 @@ from ggulnote_ml.video_preprocessing.mediapipe_landmarks import (
 
 LABEL_COLUMNS = (
     "participant",
+    "head_pose",
     "protocol",
     "split",
     "pair",
@@ -59,7 +60,7 @@ class ProtocolResult:
     protocol_id: str
     status: str
     frame_pairs: int
-    label_path: Path
+    frame_log_path: Path
 
 
 class PairedLabelWriter:
@@ -104,6 +105,7 @@ class PairedLabelWriter:
         self._writer.writerow(
             {
                 "participant": paths.participant_id,
+                "head_pose": paths.head_pose,
                 "protocol": state.protocol_id,
                 "split": state.split,
                 "pair": pair_index,
@@ -139,12 +141,28 @@ class PairedLabelWriter:
         self._file.close()
 
 
-def render_protocol(display: DisplayConfig, plan: ProtocolPlan, state: ProtocolFrameState) -> np.ndarray:
+def render_protocol(
+    display: DisplayConfig,
+    plan: ProtocolPlan,
+    state: ProtocolFrameState,
+    head_pose: str = "",
+) -> np.ndarray:
     canvas = np.full(
         (display.canvas_height, display.canvas_width, 3),
         display.background_bgr,
         dtype=np.uint8,
     )
+    if head_pose and state.phase != "target":
+        cv2.putText(
+            canvas,
+            "HEAD POSE: %s" % head_pose,
+            (20, 32),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
     if state.phase == "ready":
         _center_text(canvas, "%s starts soon" % plan.protocol_id, display.canvas_height // 2, 1.0)
         _center_text(canvas, "Keep your head still and follow the dot", display.canvas_height // 2 + 50, 0.7)
@@ -179,6 +197,89 @@ def render_protocol(display: DisplayConfig, plan: ProtocolPlan, state: ProtocolF
     elif state.phase == "complete_message":
         _center_text(canvas, "%s complete" % plan.protocol_id, display.canvas_height // 2, 1.0)
     return canvas
+
+
+def render_display_check(display: DisplayConfig) -> np.ndarray:
+    """Render an edge-to-edge test pattern for the configured collection display."""
+
+    canvas = np.full(
+        (display.canvas_height, display.canvas_width, 3),
+        display.background_bgr,
+        dtype=np.uint8,
+    )
+    border_width = max(4, round(min(display.canvas_width, display.canvas_height) * 0.008))
+    cv2.rectangle(
+        canvas,
+        (0, 0),
+        (display.canvas_width - 1, display.canvas_height - 1),
+        (0, 255, 0),
+        border_width,
+    )
+    _center_text(
+        canvas,
+        "GREEN BORDER MUST TOUCH ALL 4 SCREEN EDGES",
+        display.canvas_height // 2,
+        0.8,
+    )
+    _center_text(
+        canvas,
+        "Press Q or Esc to close",
+        display.canvas_height // 2 + 48,
+        0.65,
+    )
+    return canvas
+
+
+def _open_protocol_window(display: DisplayConfig) -> Tuple[int, int, int, int]:
+    """Open the target window without OpenCV letterboxing the dot-test canvas."""
+
+    flags = cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO
+    cv2.namedWindow(display.window_name, flags)
+    blank_canvas = np.full(
+        (display.canvas_height, display.canvas_width, 3),
+        display.background_bgr,
+        dtype=np.uint8,
+    )
+    # HighGUI on macOS needs a mapped normal window before switching to
+    # fullscreen. Setting fullscreen first can place the window in an invisible
+    # Space (reported as a negative y coordinate).
+    cv2.imshow(display.window_name, blank_canvas)
+    cv2.waitKey(100)
+    cv2.moveWindow(display.window_name, 0, 0)
+    cv2.setWindowProperty(
+        display.window_name,
+        cv2.WND_PROP_ASPECT_RATIO,
+        cv2.WINDOW_FREERATIO,
+    )
+    if display.fullscreen:
+        cv2.setWindowProperty(
+            display.window_name,
+            cv2.WND_PROP_FULLSCREEN,
+            cv2.WINDOW_FULLSCREEN,
+        )
+        cv2.waitKey(300)
+    cv2.setWindowProperty(
+        display.window_name,
+        cv2.WND_PROP_ASPECT_RATIO,
+        cv2.WINDOW_FREERATIO,
+    )
+    cv2.imshow(display.window_name, blank_canvas)
+    cv2.waitKey(100)
+    return tuple(int(value) for value in cv2.getWindowImageRect(display.window_name))
+
+
+def run_display_check(config: CaptureConfig) -> Tuple[int, int, int, int]:
+    """Show a no-data display check and return HighGUI's rendered image rectangle."""
+
+    try:
+        image_rect = _open_protocol_window(config.display)
+        while True:
+            cv2.imshow(config.display.window_name, render_display_check(config.display))
+            key = cv2.waitKey(20) & 0xFF
+            if key in {ord("q"), 27}:
+                return image_rect
+    finally:
+        cv2.destroyAllWindows()
 
 
 class _ConfirmationInput:
@@ -242,6 +343,7 @@ def _preflight_canvas(
     landmark_results: Optional[Dict[str, FaceIrisLandmarks]] = None,
     successful_detections: int = 0,
     required_detections: int = 0,
+    landmark_required_cameras: Tuple[str, ...] = (),
 ) -> np.ndarray:
     """Build a labeled side-by-side preview without modifying source frames."""
 
@@ -253,13 +355,16 @@ def _preflight_canvas(
             packet.frame,
             (camera_width_px, max(1, round(height * scale))),
         )
-        result = landmark_results.get(label) if landmark_results else None
+        result = landmark_results.get(label) if landmark_results is not None else None
         status = ""
         color = (0, 255, 0)
         if result is not None:
             valid = result.face_detected and result.iris_detected
             status = " - MediaPipe OK" if valid else " - ADJUST CAMERA"
             color = (0, 255, 0) if valid else (0, 0, 255)
+        elif landmark_results is not None and label not in landmark_required_cameras:
+            status = " - IMAGE ONLY"
+            color = (0, 255, 255)
         cv2.putText(
             panel,
             label + status,
@@ -272,7 +377,7 @@ def _preflight_canvas(
         )
         panels.append(panel)
     canvas = cv2.hconcat(panels)
-    if landmark_results:
+    if landmark_results is not None:
         cv2.putText(
             canvas,
             "MediaPipe stability %d/%d (q/Esc: abort)"
@@ -284,7 +389,7 @@ def _preflight_canvas(
             2,
             cv2.LINE_AA,
         )
-        footer = "phonecam: one visible eye is OK; keep the full face outline in frame"
+        footer = "phonecam: side image only; check focus, exposure, and one visible eye"
     else:
         footer = "Camera check %.1fs - keep both feeds moving" % max(
             0.0, remaining_seconds
@@ -306,18 +411,22 @@ def _run_camera_preflight(
     config: CaptureConfig,
     webcam_source: CameraSource,
     phone_source: CameraSource,
+    head_pose: str = "",
 ) -> None:
     """Verify both live feeds before recording, without reopening either camera."""
 
     if not config.preview.enabled or config.preview.preflight_duration_ms == 0:
         return
     started_ns = time.monotonic_ns()
-    window_name = "%s - preflight" % config.preview.window_name_prefix
+    window_name = "%s - preflight%s" % (
+        config.preview.window_name_prefix,
+        " - " + head_pose if head_pose else "",
+    )
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     successful_detections = 0
     with ExitStack() as stack:
         extractors = None
-        if config.preview.require_face_landmarks:
+        if config.preview.landmark_required_cameras:
             extractors = {
                 camera: stack.enter_context(
                     MediaPipeFaceIrisExtractor(
@@ -326,7 +435,7 @@ def _run_camera_preflight(
                         )
                     )
                 )
-                for camera in ("webcam", "phonecam")
+                for camera in config.preview.landmark_required_cameras
             }
 
         try:
@@ -336,16 +445,17 @@ def _run_camera_preflight(
                 phonecam = phone_source.read(started_ns)
                 results = None
                 if extractors is not None:
+                    frames = {"webcam": webcam.frame, "phonecam": phonecam.frame}
                     results = {
-                        "webcam": extractors["webcam"].extract(webcam.frame),
-                        "phonecam": extractors["phonecam"].extract(phonecam.frame),
+                        camera: extractor.extract(frames[camera])
+                        for camera, extractor in extractors.items()
                     }
-                    both_valid = all(
+                    required_valid = all(
                         result.face_detected and result.iris_detected
                         for result in results.values()
                     )
                     successful_detections = (
-                        successful_detections + 1 if both_valid else 0
+                        successful_detections + 1 if required_valid else 0
                     )
                 remaining_seconds = (
                     config.preview.preflight_duration_ms - elapsed_ms
@@ -360,6 +470,7 @@ def _run_camera_preflight(
                         results,
                         successful_detections,
                         config.preview.required_consecutive_detections,
+                        config.preview.landmark_required_cameras,
                     ),
                 )
                 key = cv2.waitKey(1) & 0xFF
@@ -389,26 +500,27 @@ def _run_real_protocols_inner(
     with ExitStack() as stack:
         webcam_source = stack.enter_context(CameraSource(by_role["webcam_front"]))
         phone_source = stack.enter_context(CameraSource(by_role["iphone_left"]))
-        _run_camera_preflight(config, webcam_source, phone_source)
+        _run_camera_preflight(config, webcam_source, phone_source, paths.head_pose)
         collection_started_ns = time.monotonic_ns()
         webcam_recorder, phone_recorder = _collection_recorders(
             config, paths, by_role["webcam_front"].fps
         )
-        label_path = paths.labels_directory / "labels.csv"
-        labels = PairedLabelWriter(label_path)
+        frame_log_path = paths.metadata_directory / "frame_log.csv"
+        labels = PairedLabelWriter(frame_log_path)
         frame_samples = FrameSampleWriter(paths, config.frame_capture, config.display)
+        write_protocol_manifest(
+            paths.metadata_directory / "protocol.csv",
+            plans,
+            participant=paths.participant_id,
+            head_pose=paths.head_pose,
+        )
         pair_index = 0
-        cv2.namedWindow(config.display.window_name, cv2.WINDOW_NORMAL)
+        _open_protocol_window(config.display)
         confirmation_input = _ConfirmationInput()
         cv2.setMouseCallback(config.display.window_name, confirmation_input.on_mouse)
-        if config.display.fullscreen:
-            cv2.setWindowProperty(
-                config.display.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN
-            )
 
         try:
             for plan in plans:
-                write_protocol_events(paths.events_directory / (plan.protocol_id + ".csv"), plan)
                 runner = ProtocolRunner(plan)
                 protocol_started_ns = time.monotonic_ns()
                 protocol_pairs = 0
@@ -420,7 +532,12 @@ def _run_real_protocols_inner(
                         break
                     cv2.imshow(
                         config.display.window_name,
-                        render_protocol(config.display, plan, display_state),
+                        render_protocol(
+                            config.display,
+                            plan,
+                            display_state,
+                            paths.head_pose,
+                        ),
                     )
                     key = cv2.waitKey(1) & 0xFF
                     display_timestamp_ns = time.time_ns()
@@ -455,7 +572,9 @@ def _run_real_protocols_inner(
                         phone_recorder.write(iphone)
                     pair_index += 1
                     protocol_pairs += 1
-                results.append(ProtocolResult(plan.protocol_id, status, protocol_pairs, label_path))
+                results.append(
+                    ProtocolResult(plan.protocol_id, status, protocol_pairs, frame_log_path)
+                )
                 frame_samples.flush()
                 if status == "aborted":
                     break
@@ -524,17 +643,22 @@ def run_simulation_protocols(
     results = []
     pair_index = 0
     webcam_recorder, phone_recorder = _collection_recorders(config, paths, simulation.fps)
-    label_path = paths.labels_directory / "labels.csv"
-    labels = PairedLabelWriter(label_path)
+    frame_log_path = paths.metadata_directory / "frame_log.csv"
+    labels = PairedLabelWriter(frame_log_path)
     frame_samples = FrameSampleWriter(
         paths,
         config.frame_capture,
         config.display,
         enable_mediapipe_quality=False,
     )
+    write_protocol_manifest(
+        paths.metadata_directory / "protocol.csv",
+        plans,
+        participant=paths.participant_id,
+        head_pose=paths.head_pose,
+    )
     try:
         for plan in plans:
-            write_protocol_events(paths.events_directory / (plan.protocol_id + ".csv"), plan)
             runner = ProtocolRunner(plan)
             protocol_pairs = 0
             while True:
@@ -587,7 +711,14 @@ def run_simulation_protocols(
                     phone_recorder.write(iphone)
                 pair_index += 1
                 protocol_pairs += 1
-            results.append(ProtocolResult(plan.protocol_id, "completed", protocol_pairs, label_path))
+            results.append(
+                ProtocolResult(
+                    plan.protocol_id,
+                    "completed",
+                    protocol_pairs,
+                    frame_log_path,
+                )
+            )
             frame_samples.flush()
     finally:
         labels.close()

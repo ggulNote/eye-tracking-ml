@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-SCHEMA_VERSION = "dual_view_video_v2"
-VIDEO_FEATURE_SCHEMA_VERSION = "video_mediapipe_undistorted_2d_v2"
+SCHEMA_VERSION = "dual_view_video_v4"
+VIDEO_FEATURE_SCHEMA_VERSION = "video_mediapipe_undistorted_2d_v3"
 
 DUAL_VIEW_MANIFEST_COLUMNS = (
     "sample_id",
     "subject_id",
+    "head_pose",
     "view",
     "image_path",
     "pair_id",
@@ -55,6 +56,7 @@ PROCESSED_FEATURE_COLUMNS = (
     "schema_version",
     "sample_id",
     "participant",
+    "head_pose",
     "camera",
     "pair_id",
     "pair",
@@ -93,6 +95,7 @@ class SelectedSample:
 
     sample: str
     participant: str
+    head_pose: str
     protocol: str
     split: str
     source_pair: int
@@ -117,6 +120,7 @@ class SelectedSample:
 @dataclass(frozen=True)
 class SynchronizedPair:
     participant: str
+    head_pose: str
     pair: int
     webcam_frame: Optional[int]
     phonecam_frame: Optional[int]

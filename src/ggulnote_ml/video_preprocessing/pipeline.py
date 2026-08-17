@@ -13,7 +13,11 @@ from ggulnote_ml.capture.calibration_assets import (
     CameraIntrinsics,
     load_camera_intrinsics,
 )
-from ggulnote_ml.capture.dataset import normalize_participant_id
+from ggulnote_ml.capture.dataset import (
+    normalize_head_pose,
+    normalize_participant_id,
+    participant_recording_directory,
+)
 from ggulnote_ml.exceptions import ContractError, OptionalDependencyError
 from ggulnote_ml.video_preprocessing.contracts import (
     DUAL_VIEW_MANIFEST_COLUMNS,
@@ -124,56 +128,91 @@ class SequentialBgrFrameDecoder:
 def run_video_preprocessing(
     participant_id: str,
     dataset_root: Path,
-    output_root: Path,
+    output_root: Optional[Path] = None,
+    head_pose: Optional[str] = None,
     cv2_module: Any = None,
     landmark_extractor_factory: Any = None,
     ear_threshold: float = 0.20,
     intrinsics_mode: str = "required",
+    feature_cameras: Sequence[str] = ("webcam",),
 ) -> VideoPreprocessingResult:
-    """Export frames and MediaPipe features from A's synchronized video pairs."""
+    """Export paired frames and configured MediaPipe features from synchronized video."""
 
     if not 0.0 < ear_threshold < 1.0:
         raise ValueError("ear_threshold must be in (0,1).")
+    configured_feature_cameras = tuple(
+        str(camera).strip().lower() for camera in feature_cameras
+    )
+    if not configured_feature_cameras:
+        raise ValueError("feature_cameras must contain at least one camera.")
+    if len(set(configured_feature_cameras)) != len(configured_feature_cameras):
+        raise ValueError("feature_cameras must not contain duplicates.")
+    unsupported_feature_cameras = set(configured_feature_cameras) - {
+        "webcam",
+        "phonecam",
+    }
+    if unsupported_feature_cameras:
+        raise ValueError(
+            "feature_cameras contains unsupported cameras: %s"
+            % ", ".join(sorted(unsupported_feature_cameras))
+        )
     intrinsics_mode = intrinsics_mode.strip().lower()
     if intrinsics_mode not in {"required", "off"}:
         raise ValueError("intrinsics_mode must be required or off.")
 
     participant = normalize_participant_id(participant_id)
+    normalized_head_pose = (
+        ""
+        if head_pose is None or str(head_pose).strip() == ""
+        else normalize_head_pose(head_pose)
+    )
     raw_root = dataset_root.expanduser().resolve()
-    participant_source = raw_root / participant
+    participant_source = participant_recording_directory(
+        raw_root,
+        participant,
+        normalized_head_pose or None,
+    )
     if not participant_source.is_dir():
         raise FileNotFoundError(
             "Participant directory does not exist: %s" % participant_source
         )
-    destination_root = output_root.expanduser().resolve()
-    if destination_root == raw_root:
-        raise ContractError("Video preprocessing output_root must differ from raw dataset_root.")
-    try:
-        destination_root.relative_to(raw_root)
-    except ValueError:
-        pass
+    if output_root is None:
+        participant_output = participant_source / "feature_maps"
     else:
-        raise ContractError(
-            "Video preprocessing output_root must not be inside raw dataset_root."
-        )
-    participant_output = destination_root / participant
-    manifest_directory = destination_root / "manifests"
-    training_manifest = manifest_directory / (participant + "_training.csv")
-    evaluation_manifest = manifest_directory / (participant + "_evaluation.csv")
-    video_training_features = manifest_directory / (
-        participant + "_video_training.csv"
-    )
-    video_evaluation_features = manifest_directory / (
-        participant + "_video_evaluation.csv"
-    )
-    summary_json = manifest_directory / (participant + "_summary.json")
+        destination_root = output_root.expanduser().resolve()
+        if destination_root == raw_root:
+            raise ContractError(
+                "External video preprocessing output_root must differ from raw dataset_root."
+            )
+        try:
+            destination_root.relative_to(raw_root)
+        except ValueError:
+            pass
+        else:
+            raise ContractError(
+                "External output_root must be outside raw dataset_root; omit it to use "
+                "<participant_name>/<head_pose>/feature_maps/."
+            )
+        participant_output = destination_root / participant
+        if normalized_head_pose:
+            participant_output = participant_output / normalized_head_pose
+    training_manifest = participant_output / "training.csv"
+    evaluation_manifest = participant_output / "evaluation.csv"
+    video_training_features = participant_output / "training_features.csv"
+    video_evaluation_features = participant_output / "evaluation_features.csv"
+    summary_json = participant_output / "summary.json"
+    web_frames_directory = participant_output / "web" / "frames"
+    phone_frames_directory = participant_output / "phone" / "frames"
     protected_outputs = (
-        participant_output,
         training_manifest,
         evaluation_manifest,
         video_training_features,
         video_evaluation_features,
         summary_json,
+        web_frames_directory,
+        phone_frames_directory,
+        participant_output / "web" / "features.csv",
+        participant_output / "phone" / "features.csv",
     )
     existing = [path for path in protected_outputs if path.exists()]
     if existing:
@@ -182,16 +221,18 @@ def run_video_preprocessing(
             % ", ".join(str(path) for path in existing)
         )
 
-    synchronized_path = (
-        participant_source / "synchronized" / "synchronized_frames.csv"
-    )
-    selected_samples_path = participant_source / "labels" / "image_samples.csv"
+    synchronized_path = participant_source / "feature_maps" / "synchronized.csv"
+    selected_samples_path = participant_source / "labels" / "labels.csv"
     pairs = load_synchronized_pairs(synchronized_path)
     selected_samples = load_selected_samples(selected_samples_path)
     if any(pair.participant != participant for pair in pairs):
         raise ContractError("Synchronized participant does not match the requested participant.")
+    if any(pair.head_pose != normalized_head_pose for pair in pairs):
+        raise ContractError("Synchronized head_pose does not match the requested head pose.")
     if any(sample.participant != participant for sample in selected_samples):
         raise ContractError("Selected sample participant does not match the requested participant.")
+    if any(sample.head_pose != normalized_head_pose for sample in selected_samples):
+        raise ContractError("Selected sample head_pose does not match the requested head pose.")
     screen_width, screen_height = load_screen_size(
         participant_source / "participant.json"
     )
@@ -213,7 +254,10 @@ def run_video_preprocessing(
     if intrinsics_mode == "required":
         for camera in camera_intrinsics:
             camera_intrinsics[camera] = load_camera_intrinsics(
-                participant_source / "Calibration" / camera / "Camera.mat"
+                participant_source
+                / "calibration"
+                / ("web" if camera == "webcam" else "phone")
+                / "Camera.mat"
             )
     undistorters = {
         camera: (
@@ -225,14 +269,13 @@ def run_video_preprocessing(
     }
     if landmark_extractor_factory is None:
         landmark_extractor_factory = _default_landmark_extractor_factory
-    (participant_output / "webcam").mkdir(parents=True, exist_ok=False)
-    (participant_output / "phonecam").mkdir(parents=True, exist_ok=False)
-    manifest_directory.mkdir(parents=True, exist_ok=True)
+    web_frames_directory.mkdir(parents=True, exist_ok=False)
+    phone_frames_directory.mkdir(parents=True, exist_ok=False)
 
     rows = {"training": [], "evaluation": []}
     feature_rows = {"webcam": [], "phonecam": []}
-    webcam_video = participant_source / "webcam" / "capture.mp4"
-    phonecam_video = participant_source / "phonecam" / "capture.mp4"
+    webcam_video = participant_source / "video" / "web" / "capture.mp4"
+    phonecam_video = participant_source / "video" / "phone" / "capture.mp4"
     with ExitStack() as stack:
         webcam_decoder = stack.enter_context(
             SequentialBgrFrameDecoder(webcam_video, cv2_module=cv2_module)
@@ -240,12 +283,10 @@ def run_video_preprocessing(
         phonecam_decoder = stack.enter_context(
             SequentialBgrFrameDecoder(phonecam_video, cv2_module=cv2_module)
         )
-        webcam_landmarks = stack.enter_context(
-            landmark_extractor_factory("webcam")
-        )
-        phonecam_landmarks = stack.enter_context(
-            landmark_extractor_factory("phonecam")
-        )
+        landmark_extractors = {
+            camera: stack.enter_context(landmark_extractor_factory(camera))
+            for camera in configured_feature_cameras
+        }
         for selection in selected_pairs:
             pair = selection.synchronized
             assert pair.webcam_frame is not None
@@ -258,10 +299,18 @@ def run_video_preprocessing(
                 webcam_frame = undistorters["webcam"].apply(webcam_frame)
             if undistorters["phonecam"] is not None:
                 phonecam_frame = undistorters["phonecam"].apply(phonecam_frame)
-            pair_id = "%s_%s" % (participant, selection.sample.sample)
+            pair_id = "_".join(
+                value
+                for value in (
+                    participant,
+                    normalized_head_pose,
+                    selection.sample.sample,
+                )
+                if value
+            )
             webcam_image_row = _write_view_image_and_row(
                 cv2_module,
-                destination_root,
+                participant_output,
                 participant_output,
                 pair,
                 pair_id,
@@ -272,7 +321,7 @@ def run_video_preprocessing(
             )
             phonecam_image_row = _write_view_image_and_row(
                 cv2_module,
-                destination_root,
+                participant_output,
                 participant_output,
                 pair,
                 pair_id,
@@ -282,43 +331,38 @@ def run_video_preprocessing(
                 screen_height,
             )
             rows[partition].extend((webcam_image_row, phonecam_image_row))
-            webcam_result = extract_video_frame_features(
-                webcam_landmarks.extract(webcam_frame), ear_threshold
-            )
-            phonecam_result = extract_video_frame_features(
-                phonecam_landmarks.extract(phonecam_frame), ear_threshold
-            )
-            feature_rows["webcam"].append(
-                _processed_feature_row(
-                    pair,
-                    pair_id,
-                    "webcam",
-                    webcam_result,
-                    str(webcam_image_row["image_path"]),
-                    camera_intrinsics["webcam"],
-                    participant_source,
+            frames = {"webcam": webcam_frame, "phonecam": phonecam_frame}
+            image_rows = {
+                "webcam": webcam_image_row,
+                "phonecam": phonecam_image_row,
+            }
+            for camera in configured_feature_cameras:
+                features = extract_video_frame_features(
+                    landmark_extractors[camera].extract(frames[camera]),
+                    ear_threshold,
                 )
-            )
-            feature_rows["phonecam"].append(
-                _processed_feature_row(
-                    pair,
-                    pair_id,
-                    "phonecam",
-                    phonecam_result,
-                    str(phonecam_image_row["image_path"]),
-                    camera_intrinsics["phonecam"],
-                    participant_source,
+                feature_rows[camera].append(
+                    _processed_feature_row(
+                        pair,
+                        pair_id,
+                        camera,
+                        features,
+                        str(image_rows[camera]["image_path"]),
+                        camera_intrinsics[camera],
+                        participant_source,
+                    )
                 )
-            )
 
     _write_manifest(training_manifest, rows["training"])
     _write_manifest(evaluation_manifest, rows["evaluation"])
-    webcam_features = participant_output / "webcam" / "processed_features.csv"
-    phonecam_features = participant_output / "phonecam" / "processed_features.csv"
+    webcam_features = participant_output / "web" / "features.csv"
+    phonecam_features = participant_output / "phone" / "features.csv"
     write_processed_feature_csv(webcam_features, feature_rows["webcam"])
     write_processed_feature_csv(phonecam_features, feature_rows["phonecam"])
     all_feature_rows = feature_rows["webcam"] + feature_rows["phonecam"]
-    training_ready_pairs = _training_ready_pair_ids(all_feature_rows)
+    training_ready_pairs = _training_ready_pair_ids(
+        all_feature_rows, configured_feature_cameras
+    )
     training_feature_rows = [
         row
         for row in all_feature_rows
@@ -333,15 +377,17 @@ def run_video_preprocessing(
     summary = {
         "schema_version": SCHEMA_VERSION,
         "participant": participant,
+        "head_pose": normalized_head_pose,
         "source_synchronized_csv": str(synchronized_path),
-        "source_image_samples_csv": str(selected_samples_path),
-        "output_root": str(destination_root),
+        "source_labels_csv": str(selected_samples_path),
+        "output_root": str(participant_output),
         "training_pairs": len(rows["training"]) // 2,
         "evaluation_pairs": len(rows["evaluation"]) // 2,
         "selected_pairs": len(selected_pairs),
         "unselected_synchronized_pairs": len(pairs) - len(selected_pairs),
         "ear_threshold": ear_threshold,
         "intrinsics_mode": intrinsics_mode,
+        "mediapipe_feature_cameras": list(configured_feature_cameras),
         "intrinsics": {
             camera: (
                 {
@@ -383,7 +429,7 @@ def run_video_preprocessing(
     with summary_json.open("x", encoding="utf-8") as file:
         json.dump(summary, file, ensure_ascii=False, indent=2)
     return VideoPreprocessingResult(
-        output_root=destination_root,
+        output_root=participant_output,
         participant_directory=participant_output,
         training_manifest=training_manifest,
         evaluation_manifest=evaluation_manifest,
@@ -428,8 +474,9 @@ def _write_view_image_and_row(
     assert source_timestamp is not None
     assert corrected_timestamp is not None
     assert pair.x_norm is not None and pair.y_norm is not None
-    filename = "%s_%s_frame_%08d.png" % (pair_id, view, source_frame)
-    image_path = participant_output / view / filename
+    folder_name = "web" if view == "webcam" else "phone"
+    filename = "%s_%s_frame_%08d.png" % (pair_id, folder_name, source_frame)
+    image_path = participant_output / folder_name / "frames" / filename
     if image_path.exists():
         raise FileExistsError("Frame image already exists: %s" % image_path)
     if not cv2_module.imwrite(str(image_path), frame):
@@ -438,6 +485,7 @@ def _write_view_image_and_row(
     return {
         "sample_id": "%s_%s" % (pair_id, view),
         "subject_id": pair.participant,
+        "head_pose": pair.head_pose,
         "view": view,
         "image_path": relative_path,
         "pair_id": pair_id,
@@ -485,6 +533,7 @@ def _processed_feature_row(
         "schema_version": VIDEO_FEATURE_SCHEMA_VERSION,
         "sample_id": "%s_%s" % (pair_id, camera),
         "participant": pair.participant,
+        "head_pose": pair.head_pose,
         "camera": camera,
         "pair_id": pair_id,
         "pair": pair.pair,
@@ -535,6 +584,7 @@ def _processed_feature_row(
 
 def _training_ready_pair_ids(
     rows: Sequence[Dict[str, object]],
+    required_cameras: Sequence[str],
 ) -> set:
     by_pair: Dict[object, list] = {}
     for row in rows:
@@ -543,7 +593,7 @@ def _training_ready_pair_ids(
     for pair_id, pair_rows in by_pair.items():
         cameras = {row["camera"] for row in pair_rows}
         if (
-            cameras == {"webcam", "phonecam"}
+            cameras == set(required_cameras)
             and all(row["collection_split"] == "training" for row in pair_rows)
             and all(row["feature_valid"] == 1 for row in pair_rows)
         ):

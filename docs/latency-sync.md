@@ -4,7 +4,9 @@
 
 ## 원본 수집 계약
 
-`labels/labels.csv`는 보정 전 원본 기록입니다. 수집 중 화면에 실제로 표시한 좌표를 저장하며, 측정되거나 추정된 레이턴시로 좌표를 이동하지 않습니다.
+`metadata/frame_log.csv`는 보정 전 원본 기록입니다. 수집 중 화면에 실제로 표시한
+좌표와 모든 카메라 프레임을 저장하며, 측정되거나 추정된 레이턴시로 좌표를
+이동하지 않습니다. `labels/labels.csv`는 점당 선택된 최종 학습 샘플 표입니다.
 
 필수 시간 열은 모두 Unix 나노초 정수입니다.
 
@@ -22,20 +24,20 @@ phonecam_timestamp
 
 ## 원본 보존 원칙
 
-- `labels.csv`를 후속 처리에서 덮어쓰지 않습니다.
-- 레이턴시 측정 결과는 `Calibration/latency.json`에 저장합니다.
-- 보정 프레임과 좌표는 `synchronized/synchronized_frames.csv`에 새로 저장합니다.
+- `metadata/frame_log.csv`와 `labels/labels.csv`를 후속 처리에서 덮어쓰지 않습니다.
+- 레이턴시 측정 결과는 `calibration/latency.json`에 저장합니다.
+- 보정 프레임과 좌표는 `feature_maps/synchronized.csv`에 새로 저장합니다.
 - 모든 계산은 정수 나노초로 수행하고, 표시용 통계만 밀리초로 변환합니다.
 
 ## 검정·흰색 전환 측정
 
-기본 프로토콜은 검은 화면에서 시작해 800ms마다 검정과 흰색을 15회 전환합니다. 처음 5초는 착석·카메라 노출 안정화를 위한 검정 기준 구간이며 마지막 전환 후 800ms를 추가 기록합니다. 참가자는 화면 중앙의 작은 반대색 점을 계속 응시합니다.
+기본 프로토콜은 검은 화면에서 시작해 800ms마다 검정과 흰색을 20회 전환합니다. 처음 5초는 착석·카메라 노출 안정화를 위한 검정 기준 구간이며 마지막 전환 후 800ms를 추가 기록합니다. 참가자는 화면 중앙의 작은 반대색 점을 계속 응시합니다.
 
 ```text
 초기 검정: 5.0초
-전환: 15회 × 0.8초 간격
+전환: 20회 × 0.8초 간격
 마지막 기록: 0.8초
-전체: 약 17초
+전체: 약 21초
 ```
 
 카메라는 참가자 얼굴을 계속 촬영합니다. 검정·흰색 화면의 빛이 얼굴에 반사되면서 생기는 중앙 ROI 평균 밝기 변화를 사용하므로, 측정 중 카메라를 화면 쪽으로 돌리지 않습니다.
@@ -44,7 +46,8 @@ phonecam_timestamp
 
 ```bash
 python -m ggulnote_ml.synchronization \
-  --participant p00 \
+  --participant 안은제 \
+  --head-pose neutral \
   --capture-config configs/capture.yaml \
   --latency-config configs/latency.yaml
 ```
@@ -54,13 +57,19 @@ python -m ggulnote_ml.synchronization \
 ```bash
 python -m ggulnote_ml.synchronization \
   --simulate \
-  --participant p00 \
+  --participant 테스트참가자 \
+  --head-pose neutral \
   --dataset-root /private/tmp/gaze-latency-simulation
 ```
 
 ## 밝기 변화 검출
 
-정면 웹캠과 측면 phonecam은 얼굴 위치가 다르므로 설정에 카메라별 얼굴 ROI와 최소 밝기 변화량을 따로 둡니다. 각 후보 프레임에서 설정된 개수의 이전·이후 프레임 평균을 비교합니다. 흰색 전환은 양의 밝기 변화, 검정 전환은 음의 밝기 변화를 찾습니다.
+정면 웹캠과 측면 phonecam은 얼굴 위치가 다르므로 설정에 카메라별 ROI 후보와 최소
+밝기 변화량을 따로 둡니다. 모든 ROI 후보를 측정한 뒤 유효 전환 수가 많고 latency
+MAD가 작은 영역을 자동 선택합니다. 따라서 참가자의 키나 head pose로 얼굴 위치가
+달라져도 하나의 고정 ROI 때문에 전체 측정이 실패하지 않습니다. 각 후보 프레임에서
+설정된 개수의 이전·이후 프레임 평균을 비교합니다. 흰색 전환은 양의 밝기 변화,
+검정 전환은 음의 밝기 변화를 찾습니다.
 
 - `min_brightness_change`보다 작은 변화는 무효
 - `max_latency_ms` 이후의 프레임은 검색하지 않음
@@ -76,12 +85,14 @@ mad_ms
 p95_ms
 valid_events
 total_events
+selected_roi_index
+selected_roi_norm
 ```
 
 ## 출력 구조
 
 ```text
-p00/Calibration/
+안은제/neutral/calibration/
 ├── latency.json                         # 유효한 최종 결과만 생성
 └── latency_runs/latency_<UTC>/
     ├── capture_config.yaml
@@ -97,7 +108,7 @@ p00/Calibration/
     └── result.json
 ```
 
-유효한 `Calibration/latency.json`은 덮어쓰지 않습니다. 검출에 실패하거나 중단한 실행은 run 디렉터리에 진단 자료만 남기며, 설정을 조정한 뒤 새 run으로 다시 측정할 수 있습니다.
+유효한 `calibration/latency.json`은 덮어쓰지 않습니다. 검출에 실패하거나 중단한 실행은 run 디렉터리에 진단 자료만 남기며, 설정을 조정한 뒤 새 run으로 다시 측정할 수 있습니다.
 
 ## Simulation
 
@@ -111,12 +122,13 @@ base_unix_timestamp_ns + frame * frame_interval_ns
 
 ## 다음 구현 단계
 
-유효한 `Calibration/latency.json`과 새 형식의 `labels/labels.csv`가 있으면 다음 명령으로 보정·매칭합니다.
+유효한 `calibration/latency.json`과 `metadata/frame_log.csv`가 있으면 다음 명령으로 보정·매칭합니다.
 
 ```bash
 python -m ggulnote_ml.synchronization \
   --synchronize \
-  --participant p00
+  --participant 안은제 \
+  --head-pose neutral
 ```
 
 장비, 해상도, FPS, 카메라 연결 방식과 위치가 모두 동일한 상태에서 바로 이어서
@@ -127,8 +139,9 @@ python -m ggulnote_ml.synchronization \
 ```bash
 python -m ggulnote_ml.synchronization \
   --synchronize \
-  --participant p02 \
-  --latency-json data/raw/participants/p00/Calibration/latency.json
+  --participant 이승연 \
+  --head-pose neutral \
+  --latency-json data/raw/participants/안은제/neutral/calibration/latency.json
 ```
 
 처리 순서:
@@ -142,8 +155,8 @@ python -m ggulnote_ml.synchronization \
 7. 원본을 건드리지 않고 새 CSV와 요약 JSON을 저장합니다.
 
 ```text
-p00/synchronized/
-├── synchronized_frames.csv
+안은제/neutral/feature_maps/
+├── synchronized.csv
 └── synchronization.json
 ```
 

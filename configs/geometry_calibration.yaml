@@ -4,10 +4,10 @@ setup:
   output_directory: data/calibration/setups/macbook_air_m5_13_iphone16
 
 screen:
-  # dot test가 저장하는 좌표계입니다. 화면 종횡비(2560:1664)와 일치하도록
-  # 1920x1248 캔버스를 사용합니다.
-  width_pixel: 1920
-  height_pixel: 1248
+  # dot test가 저장하는 좌표계입니다. 현재 macOS의 활성 전체화면
+  # 크기와 동일하게 유지합니다.
+  width_pixel: 1470
+  height_pixel: 956
   # Apple 공식 2560x1664, 224 ppi 사양으로 계산했습니다.
   width_mm: 290.286
   height_mm: 188.686

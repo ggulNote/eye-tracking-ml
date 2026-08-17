@@ -31,8 +31,8 @@ def test_default_geometry_config_matches_fixed_macbook_setup():
     config = load_geometry_calibration_config(Path("configs/geometry_calibration.yaml"))
 
     assert config.setup_id == "macbook_air_m5_13_iphone16"
-    assert config.screen.width_pixel == 1920
-    assert config.screen.height_pixel == 1248
+    assert config.screen.width_pixel == 1470
+    assert config.screen.height_pixel == 956
     assert config.checkerboard.spec.pattern_size == (9, 6)
     assert config.checkerboard.spec.squares_x == 10
     assert config.checkerboard.spec.squares_y == 7

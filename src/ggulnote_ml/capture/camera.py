@@ -77,11 +77,23 @@ class CameraSource:
     def read(self, session_started_ns: int) -> FramePacket:
         if self._capture is None:
             raise RuntimeError("CameraSource must be used as a context manager.")
-        ok, frame = self._capture.read()
+        ok = False
+        frame = None
+        attempts = self.config.read_retry_count + 1
+        for attempt in range(attempts):
+            ok, frame = self._capture.read()
+            if ok and frame is not None:
+                break
+            if attempt + 1 < attempts and self.config.read_retry_delay_ms > 0:
+                time.sleep(self.config.read_retry_delay_ms / 1000.0)
         captured_ns = time.monotonic_ns()
         unix_timestamp_ns = time.time_ns()
         if not ok or frame is None:
-            raise RuntimeError("Could not read a frame from camera %s." % self.config.name)
+            raise RuntimeError(
+                "Could not read a frame from camera %s after %d attempt(s). "
+                "Check the USB/Continuity Camera connection."
+                % (self.config.name, attempts)
+            )
         if frame.shape[:2] != (self.config.height, self.config.width):
             frame = cv2.resize(frame, (self.config.width, self.config.height))
         self._freeze_guard.observe(frame)

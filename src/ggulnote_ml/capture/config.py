@@ -21,6 +21,8 @@ class CameraConfig:
     fps: float
     warmup_frames: int
     max_identical_frames: int
+    read_retry_count: int
+    read_retry_delay_ms: float
     mirror: bool
 
 
@@ -30,7 +32,7 @@ class PreviewConfig:
     window_name_prefix: str
     preflight_duration_ms: float
     camera_width_px: int
-    require_face_landmarks: bool
+    landmark_required_cameras: Tuple[str, ...]
     required_consecutive_detections: int
     landmark_detection_confidence: float
 
@@ -59,6 +61,7 @@ class FrameCaptureConfig:
     face_min_neighbors: int
     eye_scale_factor: float
     eye_min_neighbors: int
+    mediapipe_quality_cameras: Tuple[str, ...]
     mediapipe_ready_weight: float
 
 
@@ -68,6 +71,15 @@ class DatasetConfig:
     calibration_source_directory: Path
     geometry_mode: str
     require_calibration_assets: bool
+
+
+@dataclass(frozen=True)
+class PostprocessingConfig:
+    enabled: bool
+    ear_threshold: float
+    feature_cameras: Tuple[str, ...]
+    webeyetrack_enabled: bool
+    webeyetrack_config: Path
 
 
 @dataclass(frozen=True)
@@ -148,6 +160,7 @@ class CaptureConfig:
     recording: RecordingConfig
     frame_capture: FrameCaptureConfig
     dataset: DatasetConfig
+    postprocessing: PostprocessingConfig
     display: DisplayConfig
     protocols: ProtocolsConfig
     simulation: SimulationConfig
@@ -173,6 +186,21 @@ def _parse_bgr(value: Any, name: str) -> Tuple[int, int, int]:
     if any(channel < 0 or channel > 255 for channel in color):
         raise ValueError("%s channels must be between 0 and 255." % name)
     return color
+
+
+def _parse_camera_keys(value: Any, name: str) -> Tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError("%s must be a list containing webcam and/or phonecam." % name)
+    cameras = tuple(str(camera).strip().lower() for camera in value)
+    if len(set(cameras)) != len(cameras):
+        raise ValueError("%s must not contain duplicate camera names." % name)
+    unsupported = set(cameras) - {"webcam", "phonecam"}
+    if unsupported:
+        raise ValueError(
+            "%s contains unsupported cameras: %s"
+            % (name, ", ".join(sorted(unsupported)))
+        )
+    return cameras
 
 
 def _static_config(raw: Dict[str, Any], name: str) -> StaticProtocolConfig:
@@ -245,6 +273,10 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
             fps=float(_required(item, "fps", section)),
             warmup_frames=int(_required(item, "warmup_frames", section)),
             max_identical_frames=int(_required(item, "max_identical_frames", section)),
+            read_retry_count=int(_required(item, "read_retry_count", section)),
+            read_retry_delay_ms=float(
+                _required(item, "read_retry_delay_ms", section)
+            ),
             mirror=bool(_required(item, "mirror", section)),
         )
         if camera.role not in {"webcam_front", "iphone_left"}:
@@ -253,6 +285,8 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
             raise ValueError("%s camera dimensions, fps, and index are invalid." % section)
         if camera.warmup_frames < 0 or camera.max_identical_frames <= 0:
             raise ValueError("%s camera warmup and freeze limits are invalid." % section)
+        if camera.read_retry_count < 0 or camera.read_retry_delay_ms < 0:
+            raise ValueError("%s camera read retry settings are invalid." % section)
         if camera.backend not in SUPPORTED_BACKENDS:
             raise ValueError("%s.backend must be one of %s." % (section, sorted(SUPPORTED_BACKENDS)))
         cameras.append(camera)
@@ -304,6 +338,14 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
             "landmark_detection_confidence",
             "preview",
         )
+    )
+    preview_landmark_cameras = _parse_camera_keys(
+        _required(
+            preview_raw,
+            "landmark_required_cameras",
+            "preview",
+        ),
+        "preview.landmark_required_cameras",
     )
     if (
         preview_duration_ms < 0
@@ -367,6 +409,14 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
         eye_min_neighbors=int(
             _required(frame_capture_raw, "eye_min_neighbors", "frame_capture")
         ),
+        mediapipe_quality_cameras=_parse_camera_keys(
+            _required(
+                frame_capture_raw,
+                "mediapipe_quality_cameras",
+                "frame_capture",
+            ),
+            "frame_capture.mediapipe_quality_cameras",
+        ),
         mediapipe_ready_weight=float(
             _required(
                 frame_capture_raw,
@@ -399,6 +449,46 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
         raise ValueError("frame_capture cascade neighbor counts must be positive.")
     if frame_capture.mediapipe_ready_weight <= 0:
         raise ValueError("frame_capture.mediapipe_ready_weight must be positive.")
+
+    postprocessing_raw = _mapping(raw, "postprocessing")
+    webeyetrack_config = Path(
+        str(
+            _required(
+                postprocessing_raw,
+                "webeyetrack_config",
+                "postprocessing",
+            )
+        )
+    )
+    if not webeyetrack_config.is_absolute():
+        webeyetrack_config = project_root / webeyetrack_config
+    postprocessing = PostprocessingConfig(
+        enabled=bool(_required(postprocessing_raw, "enabled", "postprocessing")),
+        ear_threshold=float(
+            _required(postprocessing_raw, "ear_threshold", "postprocessing")
+        ),
+        feature_cameras=_parse_camera_keys(
+            _required(postprocessing_raw, "feature_cameras", "postprocessing"),
+            "postprocessing.feature_cameras",
+        ),
+        webeyetrack_enabled=bool(
+            _required(
+                postprocessing_raw,
+                "webeyetrack_enabled",
+                "postprocessing",
+            )
+        ),
+        webeyetrack_config=webeyetrack_config.resolve(),
+    )
+    if not 0.0 < postprocessing.ear_threshold < 1.0:
+        raise ValueError("postprocessing.ear_threshold must be within (0, 1).")
+    if not postprocessing.feature_cameras:
+        raise ValueError("postprocessing.feature_cameras must not be empty.")
+    if postprocessing.webeyetrack_enabled and not postprocessing.webeyetrack_config.is_file():
+        raise FileNotFoundError(
+            "WebEyeTrack preprocessing config does not exist: %s"
+            % postprocessing.webeyetrack_config
+        )
 
     display_raw = _mapping(raw, "display")
     canvas_width = int(_required(display_raw, "canvas_width", "display"))
@@ -481,9 +571,7 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
             window_name_prefix=str(_required(preview_raw, "window_name_prefix", "preview")),
             preflight_duration_ms=preview_duration_ms,
             camera_width_px=preview_width_px,
-            require_face_landmarks=bool(
-                _required(preview_raw, "require_face_landmarks", "preview")
-            ),
+            landmark_required_cameras=preview_landmark_cameras,
             required_consecutive_detections=preview_consecutive_detections,
             landmark_detection_confidence=preview_landmark_confidence,
         ),
@@ -499,6 +587,7 @@ def load_capture_config(config_path: Path) -> CaptureConfig:
             geometry_mode=geometry_mode,
             require_calibration_assets=require_calibration_assets,
         ),
+        postprocessing=postprocessing,
         display=DisplayConfig(
             window_name=str(_required(display_raw, "window_name", "display")),
             fullscreen=bool(_required(display_raw, "fullscreen", "display")),

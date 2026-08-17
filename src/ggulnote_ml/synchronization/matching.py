@@ -32,6 +32,7 @@ REQUIRED_LABEL_COLUMNS = {
 
 SYNC_COLUMNS = (
     "participant",
+    "head_pose",
     "pair",
     "webcam_frame",
     "phonecam_frame",
@@ -119,7 +120,13 @@ def _optional_float(value: str, name: str, row_number: int) -> Optional[float]:
 
 def load_raw_labels(
     path: Path, webcam_latency_ms: float, phonecam_latency_ms: float
-) -> Tuple[str, Tuple[CameraFrameTime, ...], Tuple[CameraFrameTime, ...], Tuple[TargetSample, ...]]:
+) -> Tuple[
+    str,
+    str,
+    Tuple[CameraFrameTime, ...],
+    Tuple[CameraFrameTime, ...],
+    Tuple[TargetSample, ...],
+]:
     if not path.is_file():
         raise FileNotFoundError("Raw labels CSV does not exist: %s" % path)
     webcam_latency_ns = round(webcam_latency_ms * 1_000_000)
@@ -128,6 +135,7 @@ def load_raw_labels(
     phonecam_frames: List[CameraFrameTime] = []
     targets: List[TargetSample] = []
     participant = None
+    head_pose = None
     with path.open(encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
         fieldnames = set(reader.fieldnames or ())
@@ -145,6 +153,11 @@ def load_raw_labels(
                 participant = row_participant
             elif row_participant != participant:
                 raise ValueError("Raw labels CSV must contain exactly one participant.")
+            row_head_pose = (row.get("head_pose") or "").strip()
+            if head_pose is None:
+                head_pose = row_head_pose
+            elif row_head_pose != head_pose:
+                raise ValueError("Raw labels CSV must contain exactly one head_pose.")
             webcam_timestamp = _required_int(row, "webcam_timestamp", row_number)
             phonecam_timestamp = _required_int(row, "phonecam_timestamp", row_number)
             display_timestamp = _required_int(row, "display_timestamp", row_number)
@@ -187,7 +200,13 @@ def load_raw_labels(
         for left, right in zip(targets, targets[1:])
     ):
         raise ValueError("display_timestamp values must be non-decreasing.")
-    return participant, tuple(webcam_frames), tuple(phonecam_frames), tuple(targets)
+    return (
+        participant,
+        head_pose or "",
+        tuple(webcam_frames),
+        tuple(phonecam_frames),
+        tuple(targets),
+    )
 
 
 def _validate_strictly_increasing(frames: Sequence[CameraFrameTime], camera: str) -> None:
@@ -198,7 +217,11 @@ def _validate_strictly_increasing(frames: Sequence[CameraFrameTime], camera: str
         raise ValueError("%s corrected timestamps must be strictly increasing." % camera)
 
 
-def load_latency_medians(path: Path, participant: Optional[str] = None) -> Tuple[float, float]:
+def load_latency_medians(
+    path: Path,
+    participant: Optional[str] = None,
+    head_pose: Optional[str] = None,
+) -> Tuple[float, float]:
     if not path.is_file():
         raise FileNotFoundError("Latency calibration JSON does not exist: %s" % path)
     with path.open(encoding="utf-8") as file:
@@ -207,6 +230,8 @@ def load_latency_medians(path: Path, participant: Optional[str] = None) -> Tuple
         raise ValueError("Latency calibration status must be valid.")
     if participant is not None and data.get("participant") != participant:
         raise ValueError("Latency calibration participant does not match labels participant.")
+    if head_pose is not None and (data.get("head_pose") or "") != head_pose:
+        raise ValueError("Latency calibration head_pose does not match labels head_pose.")
     try:
         webcam = float(data["cameras"]["webcam"]["median_ms"])
         phonecam = float(data["cameras"]["phonecam"]["median_ms"])
@@ -328,14 +353,18 @@ def synchronize_labels(
     config: MatchingConfig,
     *,
     allow_shared_latency: bool = False,
+    expected_head_pose: Optional[str] = None,
 ) -> Dict[str, object]:
     webcam_latency_ms, phonecam_latency_ms = load_latency_medians(latency_path)
-    participant, webcam, phonecam, targets = load_raw_labels(
+    participant, head_pose, webcam, phonecam, targets = load_raw_labels(
         labels_path, webcam_latency_ms, phonecam_latency_ms
     )
+    if expected_head_pose is not None and head_pose != expected_head_pose:
+        raise ValueError("Raw labels head_pose does not match the requested head pose.")
     load_latency_medians(
         latency_path,
         participant=None if allow_shared_latency else participant,
+        head_pose=None if allow_shared_latency else head_pose,
     )
     if output_path.exists():
         raise FileExistsError("Synchronized CSV already exists and will not be overwritten: %s" % output_path)
@@ -362,6 +391,7 @@ def synchronize_labels(
             writer.writerow(
                 {
                     "participant": participant,
+                    "head_pose": head_pose,
                     "pair": pair_index,
                     "webcam_frame": webcam_frame.frame,
                     "phonecam_frame": phonecam_frame.frame if phonecam_frame else "",
@@ -405,6 +435,7 @@ def synchronize_labels(
     return {
         "schema_version": 1,
         "participant": participant,
+        "head_pose": head_pose,
         "labels": str(labels_path),
         "latency": str(latency_path),
         "output": str(output_path),

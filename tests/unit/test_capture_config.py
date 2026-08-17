@@ -13,6 +13,8 @@ def test_capture_config_loads_required_camera_roles_and_protocols():
         ("webcam_front", 1),
         ("iphone_left", 0),
     ]
+    assert all(camera.read_retry_count == 20 for camera in config.cameras)
+    assert all(camera.read_retry_delay_ms == 50 for camera in config.cameras)
     assert config.protocols.train_static.columns == 3
     assert config.protocols.train_static.rows == 9
     assert config.protocols.train_static.repeats == 1
@@ -30,10 +32,20 @@ def test_capture_config_loads_required_camera_roles_and_protocols():
     assert config.frame_capture.jpeg_quality == 95
     assert config.frame_capture.samples_per_target == 1
     assert config.frame_capture.eye_open_weight > config.frame_capture.face_weight
+    assert config.frame_capture.mediapipe_quality_cameras == ("webcam",)
     assert config.frame_capture.mediapipe_ready_weight == pytest.approx(1000.0)
+    assert config.preview.landmark_required_cameras == ("webcam",)
+    assert (config.display.canvas_width, config.display.canvas_height) == (1470, 956)
     assert config.dataset.geometry_mode == "intrinsics_2d"
     assert config.dataset.require_calibration_assets
     assert config.dataset.calibration_source_directory.name == "macbook_air_m5_13_iphone16"
+    assert config.postprocessing.enabled
+    assert config.postprocessing.ear_threshold == pytest.approx(0.20)
+    assert config.postprocessing.feature_cameras == ("webcam",)
+    assert config.postprocessing.webeyetrack_enabled
+    assert config.postprocessing.webeyetrack_config.name == (
+        "webeyetrack_preprocessing.yaml"
+    )
 
 
 def test_capture_config_rejects_duplicate_device_indices(tmp_path):

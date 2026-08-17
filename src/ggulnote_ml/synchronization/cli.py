@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from ggulnote_ml.capture.config import CaptureConfig, load_capture_config
-from ggulnote_ml.capture.dataset import normalize_participant_id
+from ggulnote_ml.capture.dataset import normalize_head_pose, normalize_participant_id
 
 from .calibration import (
     copy_config_snapshots,
@@ -25,7 +25,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--capture-config", default="configs/capture.yaml")
     parser.add_argument("--latency-config", default="configs/latency.yaml")
-    parser.add_argument("--participant", required=True, help="Participant id such as p00 or 0")
+    parser.add_argument("--participant", required=True, help="Participant name, for example 안은제")
+    parser.add_argument(
+        "--head-pose",
+        required=True,
+        help="Controlled recording condition: neutral, head_up, or head_down",
+    )
     parser.add_argument("--dataset-root", type=Path, help="Override dataset root")
     parser.add_argument("--measurement-id", help="Optional deterministic run id for tests")
     mode = parser.add_mutually_exclusive_group()
@@ -37,7 +42,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--labels", type=Path, help="Override raw labels.csv for synchronization")
     parser.add_argument("--latency-json", type=Path, help="Override latency.json")
-    parser.add_argument("--output", type=Path, help="Override synchronized_frames.csv")
+    parser.add_argument("--output", type=Path, help="Override feature_maps/synchronized.csv")
     return parser.parse_args(argv)
 
 
@@ -57,16 +62,21 @@ def run(args: argparse.Namespace) -> Path:
         load_capture_config(capture_config_path), args.dataset_root
     )
     latency_config = load_latency_config(latency_config_path)
+    head_pose = normalize_head_pose(args.head_pose)
     if args.synchronize:
         participant = normalize_participant_id(args.participant)
-        participant_directory = capture_config.dataset.root_directory / participant
-        labels_path = (args.labels or participant_directory / "labels" / "labels.csv").expanduser().resolve()
+        participant_directory = (
+            capture_config.dataset.root_directory / participant / head_pose
+        )
+        labels_path = (
+            args.labels or participant_directory / "metadata" / "frame_log.csv"
+        ).expanduser().resolve()
         latency_path = (
-            args.latency_json or participant_directory / "Calibration" / "latency.json"
+            args.latency_json or participant_directory / "calibration" / "latency.json"
         ).expanduser().resolve()
         output_path = (
             args.output
-            or participant_directory / "synchronized" / "synchronized_frames.csv"
+            or participant_directory / "feature_maps" / "synchronized.csv"
         ).expanduser().resolve()
         summary = synchronize_labels(
             labels_path,
@@ -76,6 +86,7 @@ def run(args: argparse.Namespace) -> Path:
             # An explicit calibration path permits deliberate reuse for a new
             # participant when the devices and camera setup have not changed.
             allow_shared_latency=args.latency_json is not None,
+            expected_head_pose=head_pose,
         )
         summary_path = output_path.parent / "synchronization.json"
         write_synchronization_summary(summary_path, summary)
@@ -89,6 +100,7 @@ def run(args: argparse.Namespace) -> Path:
         capture_config.dataset.root_directory,
         args.participant,
         measurement_id=args.measurement_id,
+        head_pose=head_pose,
     )
     copy_config_snapshots(paths, capture_config_path, latency_config_path)
     result = (

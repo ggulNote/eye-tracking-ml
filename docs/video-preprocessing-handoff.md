@@ -1,65 +1,91 @@
 # 영상 전처리와 후속 파이프라인 연결
 
-이 브랜치의 책임 범위는 A의 latency 동기화 결과를 읽어 동기화 프레임을 추출하고, 영상용 MediaPipe 특징을 생성하는 데까지다. 별도 작업자가 구현한 정적 이미지 전처리와는 독립된 처리이며, 추출된 PNG와 image manifest만 그 파이프라인에도 전달한다.
+## 입력과 출력
 
-## 전체 경계
-
-```text
-feat/latency-sync
-  synchronized_frames.csv
-feat/click-confirmed-dot-capture
-  image_samples.csv (점당 품질 최적 프레임 1쌍)
-        |
-        v
-영상 전처리(현재 브랜치)
-  같은 protocol/segment에서 가장 가까운 유효 동기화 pair 선택
-  MP4 frame decode
-  MediaPipe face + refined iris landmarks
-  left/right EAR + eye-closed state
-  normalized 2D feature vector (8 dimensions)
-        |
-        +--> camera processed CSV / video training CSV
-        |
-        +--> PNG + image manifest --> 별도 정적 이미지 전처리
-```
-
-원본 `labels.csv`, `image_samples.csv`, `synchronized_frames.csv`, `capture.mp4`는 읽기만 하며 수정하거나 덮어쓰지 않는다.
-
-## 입력
+전처리는 참가자 폴더 밖에 결과를 흩어놓지 않습니다. 한 참가자의 수집,
+동기화, 특징 결과는 같은 참가자 이름과 head pose 폴더에서 관리합니다.
 
 ```text
-data/raw/participants/p00/
-├── participant.json
-├── Calibration/webcam/Camera.mat
-├── Calibration/phonecam/Camera.mat
-├── labels/image_samples.csv
-├── synchronized/synchronized_frames.csv
-├── webcam/capture.mp4
-└── phonecam/capture.mp4
+안은제/
+└── neutral/
+    ├── calibration/{web,phone}/Camera.mat
+    ├── video/{web,phone}/capture.mp4
+    ├── labels/labels.csv
+    ├── metadata/frame_log.csv
+    └── feature_maps/
+        ├── synchronized.csv
+        ├── web/{frames,features.csv}
+        ├── phone/{frames,features.csv}
+        ├── training.csv
+        ├── evaluation.csv
+        ├── training_features.csv
+        ├── evaluation_features.csv
+        ├── webeyetrack/{eye_roi,inputs.csv,training.csv,evaluation.csv,summary.json}
+        └── summary.json
 ```
 
-`image_samples.csv`는 클릭 한 번당 품질이 가장 좋았던 원본 pair를 지정한다. 전처리기는 같은 `protocol`, `segment`, `target`, `direction` 안에서 이 원본 pair와 가장 가까운 `valid=1`, `usable=1` 동기화 pair를 하나 선택한다. 따라서 전체 프로토콜을 완료하면 학습 63쌍과 평가 18쌍, 총 81쌍만 처리한다.
+## 처리 경계
 
-실제 디코딩에는 선택된 동기화 CSV의 `webcam_frame`, `phonecam_frame`을 그대로 사용한다. MP4 FPS나 근사 timestamp로 프레임을 다시 추측하지 않는다.
+1. `sync-participant`가 `metadata/frame_log.csv`에 카메라별 latency를 적용합니다.
+2. 보정 timestamp가 가까운 web/phone 프레임을 `feature_maps/synchronized.csv`에
+   일대일로 연결합니다.
+3. `labels/labels.csv`의 점당 품질 최적 샘플을 같은 프로토콜·segment·target의
+   유효 동기화 pair에 연결합니다.
+4. 두 MP4에서 지정된 프레임 번호를 직접 디코딩합니다. FPS로 프레임을 추측하지
+   않습니다.
+5. 각 카메라의 `Camera.mat`으로 렌즈 왜곡을 보정합니다.
+6. web에는 MediaPipe 얼굴·홍채, EAR, 8차원 특징을 적용합니다.
+7. phone은 측면 이미지 모델용 동기화 이미지로 보존하며 MediaPipe를 강제하지 않습니다.
+8. web의 양쪽 눈을 `512x128`로 정규화하고, `Camera.mat` 기반 `head_vector[3]`,
+   `face_origin_3d[3]`를 생성합니다. phone에는 이 정면용 MediaPipe 단계를 적용하지
+   않습니다.
+
+원본 MP4, `metadata/frame_log.csv`, `labels/labels.csv`는 덮어쓰지 않습니다.
 
 ## 실행
 
+새 참가자 수집에서는 `make collect`가 촬영 직후 이 전처리를 자동 실행합니다.
+아래 명령은 기존 촬영본을 처리하거나 `feature_maps/synchronized.csv`가 생성되기 전
+자동 후처리 실패를 재개할 때 사용합니다. 동기화는 끝났고 MediaPipe 단계만 실패한
+경우에는 `make video-features`만 실행합니다.
+
+동기화와 특징 추출을 한 번에 실행합니다.
+
 ```bash
-pip install -e ".[video,landmarks]"
-ggulnote-video-preprocess \
-  --participant p00 \
-  --dataset-root data/raw/participants \
-  --output-root data/interim/dual_view \
-  --ear-threshold 0.20
+make prepare-participant PARTICIPANT=안은제 HEAD_POSE=neutral
 ```
 
-이 프로젝트는 `mp.solutions.face_mesh`와 Apple Silicon용 universal2 wheel을 함께 제공하는 `mediapipe==0.10.21`을 사용합니다. `make setup-capture`가 카메라 GUI와 MediaPipe 의존성을 함께 설치합니다.
+나누어 실행하려면 다음과 같습니다.
 
-같은 명령은 `python -m ggulnote_ml.video_preprocessing`으로도 실행할 수 있다.
+```bash
+make sync-participant PARTICIPANT=안은제 HEAD_POSE=neutral
+make video-features PARTICIPANT=안은제 HEAD_POSE=neutral
+make webeyetrack-inputs PARTICIPANT=안은제 HEAD_POSE=neutral
+```
 
-## 영상 8차원 특징 순서
+완료된 모든 참가자·자세를 일괄 처리할 때는 다음 명령을 사용합니다. 이미 결과가 있는
+촬영은 건너뜁니다. 의도적으로 다시 만들 때만 `FORCE=1`을 붙입니다.
 
-모든 좌표는 MediaPipe가 반환하는 frame 기준 normalized 2D 좌표다.
+```bash
+make webeyetrack-batch
+make webeyetrack-batch FORCE=1
+```
+
+직접 CLI를 사용할 수도 있습니다.
+
+```bash
+python -m ggulnote_ml.video_preprocessing \
+  --participant 안은제 \
+  --head-pose neutral \
+  --dataset-root data/raw/participants \
+  --ear-threshold 0.20 \
+  --feature-cameras webcam
+```
+
+`--output-root`를 생략하는 것이 기본이며 `안은제/neutral/feature_maps/`에 저장합니다.
+외부 실험 경로가 꼭 필요한 경우에만 `--output-root`를 명시합니다.
+
+## 정면 8차원 특징 순서
 
 1. `left_eye_center_x`
 2. `left_eye_center_y`
@@ -70,48 +96,18 @@ ggulnote-video-preprocess \
 7. `right_iris_center_x`
 8. `right_iris_center_y`
 
-기본 `intrinsics_2d` 모드는 카메라마다 실제 `Camera.mat`을 로드하고 프레임 크기가
-보정 당시 크기와 같은지 검증한다. 이후 `cv2.undistort`로 렌즈 왜곡을 제거한 같은
-크기의 프레임에서 PNG와 아래 8차원 특징을 만든다. `monitorPose.mat`은 사용하지
-않으므로 결과는 여전히 카메라별 정규화 2D 좌표다.
+좌우 EAR과 눈 감김 여부는 별도 열입니다. 얼굴·홍채 미검출 또는 양쪽 눈 감김은
+`feature_valid=0`과 `invalid_reason`으로 남기며 학습 특징에서 제외합니다.
 
-좌우 EAR은 별도 `left_ear`, `right_ear` 열이다. 각 EAR이 threshold 미만인지 좌우 눈 감김 열에 기록하고, 두 눈이 모두 감긴 경우에만 `eye_closed=1` 및 `feature_valid=0`으로 처리한다. 따라서 phonecam 측면 영상에서 한쪽 눈만 보이거나 닫힌 것으로 추정되어도 다른 한쪽이 열려 있으면 8차원 계약을 유지한다. 다만 MediaPipe FaceMesh가 시작되려면 한쪽 눈 단독 crop이 아니라 얼굴 윤곽이 포함되어야 하며, 보이지 않는 쪽 좌표는 모델의 추정값이라는 점을 해석 시 고려해야 한다.
+## 학습과 평가 분리
 
-## 출력
+- `training.csv`: train 정적 27점 + 세로 왕복 클릭 36점의 두 카메라 이미지
+- `evaluation.csv`: 학습하지 않는 정적 평가 18점의 두 카메라 이미지
+- `training_features.csv`: 유효한 정면 MediaPipe 학습 특징
+- `evaluation_features.csv`: 평가 coverage를 보기 위해 실패 행까지 보존한 특징
 
-```text
-data/interim/dual_view/
-├── p00/
-│   ├── webcam/
-│   │   ├── *.png
-│   │   └── processed_features.csv
-│   └── phonecam/
-│       ├── *.png
-│       └── processed_features.csv
-└── manifests/
-    ├── p00_training.csv
-    ├── p00_evaluation.csv
-    ├── p00_video_training.csv
-    ├── p00_video_evaluation.csv
-    └── p00_summary.json
-```
+phone 학습은 `training.csv`의 `view=phonecam`, 정면 학습은 `view=webcam` 행을
+사용합니다. 같은 `pair_id`로 두 뷰를 fusion할 수 있습니다.
 
-카메라별 `processed_features.csv`에는 training과 evaluation을 모두 보존한다. 각 행은 참가자, 카메라, A의 sample/pair, 원본 frame 번호, 원본 timestamp, latency 보정 timestamp, target, 렌즈 보정 적용 여부와 RMS, 얼굴·홍채 검출 여부, EAR, 눈 감김, 8차원 특징과 무효 사유를 포함한다.
-
-`p00_video_training.csv`에는 다음 조건을 모두 만족한 pair의 두 카메라 행만 들어간다.
-
-- A 결과의 `valid=1`, `usable=1`, `split=train`
-- webcam과 phonecam 모두 얼굴·홍채 검출 성공
-- 두 카메라 모두 `feature_valid=1`
-- evaluation 행이 아님
-
-`p00_video_evaluation.csv`에는 evaluation pair를 별도로 저장한다. 검출 실패 행도 평가 coverage 확인을 위해 `feature_valid=0`과 사유를 유지하며 학습 CSV에는 절대 들어가지 않는다.
-
-## 정적 이미지 전처리로 전달
-
-`p00_training.csv`와 `p00_evaluation.csv`는 GitHub `main`의 정적 이미지 파이프라인 입력 규격이다. 이 파일은 `sample_id`, `subject_id`, `view`, `image_path`, `pair_id`, 화면 pixel target과 화면 크기를 포함한다. 영상 MediaPipe 결과는 해당 정적 이미지 파이프라인이 재사용하지 않으며 두 처리 경로는 독립적이다.
-
-```bash
-DUAL_VIEW_MANIFEST="/absolute/path/p00_training.csv" \
-make prepare GAZE_DATA_ROOT="/absolute/path/data/interim/dual_view"
-```
+전체 폴더와 열 설명은 [참가자 데이터 폴더와 CSV 설명](participant-data-layout.md)을
+참고합니다.
