@@ -223,6 +223,34 @@ def estimate_camera_latency(
     )
 
 
+def select_camera_latency(
+    camera: str,
+    sample_candidates: Sequence[Sequence[BrightnessSample]],
+    events: Sequence[DisplayEvent],
+    config: DetectionConfig,
+) -> Tuple[CameraLatencyEstimate, int]:
+    """Select the most reliable brightness ROI for one camera.
+
+    A valid estimate is preferred first, followed by more valid transitions and
+    lower latency MAD.  This keeps the detector stable when the participant's
+    face shifts between neutral, head-up, and head-down captures.
+    """
+
+    if not sample_candidates:
+        raise ValueError("At least one brightness ROI candidate is required.")
+    estimates = tuple(
+        estimate_camera_latency(camera, samples, events, config)
+        for samples in sample_candidates
+    )
+
+    def score(item: CameraLatencyEstimate) -> Tuple[int, int, float]:
+        mad = float(item.mad_ms) if item.mad_ms is not None else float("inf")
+        return (item.status == "valid", item.valid_events, -mad)
+
+    selected_index = max(range(len(estimates)), key=lambda index: score(estimates[index]))
+    return estimates[selected_index], selected_index
+
+
 def simulate_brightness_samples(
     events: Sequence[DisplayEvent],
     protocol: FlashProtocolConfig,

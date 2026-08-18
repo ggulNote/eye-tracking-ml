@@ -6,9 +6,9 @@
 
 ```text
 webcam / phone video + synchronized gaze labels
-  -> video loader (현재 구현)
-  -> canonical full frames (현재 구현)
-  -> MediaPipe + eye/head processor (추후 구현)
+  -> video loader (구현 완료)
+  -> canonical full frames (구현 완료)
+  -> MediaPipe + eye/head processor (구현 완료)
   -> BlazeGaze encoder + gaze MLP (추후 구현)
   -> centered normalized (x, y)
 ```
@@ -73,15 +73,32 @@ float32[B,T,C,H,W]
 
 WebEyeTrack을 연결할 때는 `color_mode: rgb`를 사용해야 합니다. `gray`는 다른 모델 실험을 위한 일반 파이프라인 옵션입니다.
 
-## 5. 추후 processor가 반드시 만들어야 할 모델 입력
+## 5. 구현된 WebEyeTrack 모델 입력
 
-현재 코드는 아래 타입과 검증만 제공하며 MediaPipe나 eye patch 생성은 구현하지 않습니다.
+`make collect`의 마지막 단계 또는 `make webeyetrack-inputs`가 정면 web 이미지에
+MediaPipe와 카메라 내부 보정을 적용해 아래 입력을 생성합니다.
 
 | 이름 | shape / dtype | 의미 |
 |---|---|---|
 | `image` | `float32[B,128,512,3]`, BHWC, `[0,1]` | 정규화된 양쪽 눈 패치 |
 | `head_vector` | `float32[B,3]` | 카메라 좌표계 머리 방향 벡터 |
 | `face_origin_3d` | `float32[B,3]` | 카메라 좌표계 얼굴 원점, cm |
+
+참가자·자세별 출력은 `feature_maps/webeyetrack/`에 저장됩니다.
+
+```text
+feature_maps/webeyetrack/
+├── eye_roi/*.png       # 512x128 양쪽 눈 패치
+├── inputs.csv          # 유효/무효 행 전체와 실패 사유
+├── training.csv        # 학습용 유효 행만
+├── evaluation.csv      # 최종 평가용 유효 행만
+└── summary.json        # 유효율·거리·재투영 오차 요약
+```
+
+`head_vector`와 `face_origin_3d`는 정면 카메라의 `Camera.mat`, MediaPipe canonical
+face 좌표(cm), OpenCV `solvePnP`로 같은 프레임에서 계산합니다. training과 evaluation
+각각의 유효율이 config 기준보다 낮으면 부분 결과를 삭제하고 실패 처리하며 원본 영상과
+기존 `feature_maps`는 보존합니다.
 
 `WebEyeTrackInputBatch.validate()`가 이 경계를 검사합니다. 논문의 수식은 head pose를 `[R|t]`로 표현하지만 현재 공개 학습/배포 코드는 실제 MLP 입력을 `head_vector[3] + face_origin_3d[3]`로 구성하므로 이 저장소도 공개 코드 계약을 따릅니다.
 

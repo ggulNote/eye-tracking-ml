@@ -15,6 +15,7 @@ from ggulnote_ml.synchronization.latency import (
     brightness_from_frame,
     build_display_events,
     estimate_camera_latency,
+    select_camera_latency,
     simulate_brightness_samples,
 )
 
@@ -96,6 +97,28 @@ def test_detector_accepts_low_contrast_face_reflection_signal():
     assert estimate.valid_events >= config.detection.min_valid_events
 
 
+def test_detector_selects_reliable_roi_candidate():
+    config = load_latency_config(Path("configs/latency.yaml"))
+    events = build_display_events(config.protocol, config.simulation.base_unix_timestamp_ns)
+    signal = simulate_brightness_samples(
+        events,
+        config.protocol,
+        config.simulation,
+        config.simulation.phonecam_latency_ms,
+    )
+    flat = tuple(replace(sample, brightness=80.0) for sample in signal)
+
+    estimate, selected_index = select_camera_latency(
+        "phonecam",
+        (flat, signal),
+        events,
+        config.detection,
+    )
+
+    assert selected_index == 1
+    assert estimate.status == "valid"
+
+
 def test_detector_rejects_non_monotonic_sample_timestamps():
     config = load_latency_config(Path("configs/latency.yaml"))
     events = build_display_events(config.protocol, config.simulation.base_unix_timestamp_ns)
@@ -133,7 +156,32 @@ def test_simulation_pipeline_writes_auditable_result_and_refuses_overwrite(tmp_p
     assert paths.phonecam_brightness_csv.is_file()
     with paths.final_json.open(encoding="utf-8") as file:
         saved = json.load(file)
-    assert saved["cameras"]["webcam"]["valid_events"] == 15
-    assert saved["cameras"]["phonecam"]["valid_events"] == 15
+    assert saved["cameras"]["webcam"]["valid_events"] == config.protocol.transition_count
+    assert saved["cameras"]["phonecam"]["valid_events"] == config.protocol.transition_count
+    assert saved["cameras"]["webcam"]["selected_roi_index"] == 0
+    assert saved["cameras"]["phonecam"]["selected_roi_index"] == 0
     with pytest.raises(FileExistsError, match="will not be overwritten"):
         create_latency_paths(tmp_path, "p00", measurement_id="second")
+
+
+def test_latency_paths_are_isolated_by_named_participant_head_pose(tmp_path):
+    neutral = create_latency_paths(
+        tmp_path,
+        "안은제",
+        measurement_id="neutral_run",
+        head_pose="neutral",
+    )
+    head_up = create_latency_paths(
+        tmp_path,
+        "안은제",
+        measurement_id="up_run",
+        head_pose="head_up",
+    )
+
+    assert neutral.head_pose == "neutral"
+    assert neutral.calibration_directory == (
+        tmp_path / "안은제" / "neutral" / "calibration"
+    )
+    assert head_up.calibration_directory == (
+        tmp_path / "안은제" / "head_up" / "calibration"
+    )

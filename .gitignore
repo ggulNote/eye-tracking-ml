@@ -1,6 +1,7 @@
 .DS_Store
 .venv/
 .env
+Makefile.local
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -9,6 +10,7 @@ __pycache__/
 data/raw/*
 data/interim/*
 data/processed/*
+data/calibration/
 !data/raw/.gitkeep
 !data/interim/.gitkeep
 !data/processed/.gitkeep

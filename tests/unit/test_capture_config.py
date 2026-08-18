@@ -13,15 +13,39 @@ def test_capture_config_loads_required_camera_roles_and_protocols():
         ("webcam_front", 1),
         ("iphone_left", 0),
     ]
+    assert all(camera.read_retry_count == 20 for camera in config.cameras)
+    assert all(camera.read_retry_delay_ms == 50 for camera in config.cameras)
     assert config.protocols.train_static.columns == 3
     assert config.protocols.train_static.rows == 9
     assert config.protocols.train_static.repeats == 1
+    assert config.protocols.train_static.confirmation_required
+    assert config.protocols.train_static.minimum_fixation_ms == 400
+    assert config.protocols.train_static.capture_duration_ms == 650
     assert config.protocols.evaluation_static.columns == 3
     assert config.protocols.evaluation_static.rows == 6
     assert len(config.protocols.evaluation_static.y_positions) == 6
-    assert len(config.protocols.dynamic.columns) == 3
-    assert config.protocols.dynamic.movement_duration_ms == 5000
-    assert config.protocols.dynamic.edge_exclusion_ms == 400
+    assert len(config.protocols.vertical_click.columns) == 3
+    assert config.protocols.vertical_click.rows == 6
+    assert config.protocols.vertical_click.confirmation_required
+    assert config.frame_capture.enabled
+    assert config.frame_capture.image_format == "jpg"
+    assert config.frame_capture.jpeg_quality == 95
+    assert config.frame_capture.samples_per_target == 1
+    assert config.frame_capture.eye_open_weight > config.frame_capture.face_weight
+    assert config.frame_capture.mediapipe_quality_cameras == ("webcam",)
+    assert config.frame_capture.mediapipe_ready_weight == pytest.approx(1000.0)
+    assert config.preview.landmark_required_cameras == ("webcam",)
+    assert (config.display.canvas_width, config.display.canvas_height) == (1470, 956)
+    assert config.dataset.geometry_mode == "intrinsics_2d"
+    assert config.dataset.require_calibration_assets
+    assert config.dataset.calibration_source_directory.name == "macbook_air_m5_13_iphone16"
+    assert config.postprocessing.enabled
+    assert config.postprocessing.ear_threshold == pytest.approx(0.20)
+    assert config.postprocessing.feature_cameras == ("webcam",)
+    assert config.postprocessing.webeyetrack_enabled
+    assert config.postprocessing.webeyetrack_config.name == (
+        "webeyetrack_preprocessing.yaml"
+    )
 
 
 def test_capture_config_rejects_duplicate_device_indices(tmp_path):
@@ -32,4 +56,16 @@ def test_capture_config_rejects_duplicate_device_indices(tmp_path):
     config_path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
 
     with pytest.raises(ValueError, match="indices must be unique"):
+        load_capture_config(config_path)
+
+
+def test_capture_config_rejects_3d_mode_without_calibration_assets(tmp_path):
+    with Path("configs/capture.yaml").open(encoding="utf-8") as file:
+        raw = yaml.safe_load(file)
+    raw["dataset"]["geometry_mode"] = "calibrated_3d"
+    raw["dataset"]["require_calibration_assets"] = False
+    config_path = tmp_path / "capture.yaml"
+    config_path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="calibrated_3d mode requires"):
         load_capture_config(config_path)

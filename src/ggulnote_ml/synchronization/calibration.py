@@ -15,7 +15,11 @@ import numpy as np
 
 from ggulnote_ml.capture.camera import CameraSource
 from ggulnote_ml.capture.config import CaptureConfig
-from ggulnote_ml.capture.dataset import normalize_participant_id
+from ggulnote_ml.capture.dataset import (
+    normalize_head_pose,
+    normalize_participant_id,
+    participant_recording_directory,
+)
 from ggulnote_ml.capture.recorder import SessionRecorder
 
 from .config import LatencyConfig
@@ -26,7 +30,7 @@ from .latency import (
     brightness_from_frame,
     build_display_events,
     ensure_estimates_valid,
-    estimate_camera_latency,
+    select_camera_latency,
     simulate_brightness_samples,
 )
 
@@ -34,6 +38,7 @@ from .latency import (
 @dataclass(frozen=True)
 class LatencyPaths:
     participant_id: str
+    head_pose: str
     calibration_directory: Path
     run_directory: Path
     final_json: Path
@@ -51,10 +56,23 @@ def _default_measurement_id() -> str:
 
 
 def create_latency_paths(
-    dataset_root: Path, participant_id: str, measurement_id: Optional[str] = None
+    dataset_root: Path,
+    participant_id: str,
+    measurement_id: Optional[str] = None,
+    head_pose: Optional[str] = None,
 ) -> LatencyPaths:
     participant_id = normalize_participant_id(participant_id)
-    calibration = dataset_root.expanduser().resolve() / participant_id / "Calibration"
+    normalized_head_pose = (
+        "" if head_pose is None or str(head_pose).strip() == "" else normalize_head_pose(head_pose)
+    )
+    calibration = (
+        participant_recording_directory(
+            dataset_root,
+            participant_id,
+            normalized_head_pose or None,
+        )
+        / "calibration"
+    )
     final_json = calibration / "latency.json"
     if final_json.exists():
         raise FileExistsError("Latency calibration already exists and will not be overwritten: %s" % final_json)
@@ -62,6 +80,7 @@ def create_latency_paths(
     run_directory.mkdir(parents=True, exist_ok=False)
     return LatencyPaths(
         participant_id=participant_id,
+        head_pose=normalized_head_pose,
         calibration_directory=calibration,
         run_directory=run_directory,
         final_json=final_json,
@@ -155,22 +174,36 @@ def _finish_measurement(
     paths: LatencyPaths,
     latency_config: LatencyConfig,
     events: Sequence[DisplayEvent],
-    webcam_samples: Sequence[BrightnessSample],
-    phonecam_samples: Sequence[BrightnessSample],
+    webcam_sample_candidates: Sequence[Sequence[BrightnessSample]],
+    phonecam_sample_candidates: Sequence[Sequence[BrightnessSample]],
     mode: str,
 ) -> Dict[str, object]:
-    _write_events(paths.events_csv, events)
-    _write_brightness(paths.webcam_brightness_csv, webcam_samples)
-    _write_brightness(paths.phonecam_brightness_csv, phonecam_samples)
-    estimates = (
-        estimate_camera_latency("webcam", webcam_samples, events, latency_config.detection),
-        estimate_camera_latency("phonecam", phonecam_samples, events, latency_config.detection),
+    webcam_estimate, webcam_roi_index = select_camera_latency(
+        "webcam",
+        webcam_sample_candidates,
+        events,
+        latency_config.detection,
     )
+    phonecam_estimate, phonecam_roi_index = select_camera_latency(
+        "phonecam",
+        phonecam_sample_candidates,
+        events,
+        latency_config.detection,
+    )
+    selected_samples = (
+        webcam_sample_candidates[webcam_roi_index],
+        phonecam_sample_candidates[phonecam_roi_index],
+    )
+    _write_events(paths.events_csv, events)
+    _write_brightness(paths.webcam_brightness_csv, selected_samples[0])
+    _write_brightness(paths.phonecam_brightness_csv, selected_samples[1])
+    estimates = (webcam_estimate, phonecam_estimate)
     _write_detections(paths.detections_csv, estimates)
     status = "valid" if all(item.status == "valid" for item in estimates) else "invalid"
     result: Dict[str, object] = {
         "schema_version": 1,
         "participant": paths.participant_id,
+        "head_pose": paths.head_pose,
         "status": status,
         "mode": mode,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -179,7 +212,22 @@ def _finish_measurement(
         "latency_unit": "ms",
         "protocol": asdict(latency_config.protocol),
         "detection": asdict(latency_config.detection),
-        "cameras": {estimate.camera: _estimate_summary(estimate) for estimate in estimates},
+        "cameras": {
+            "webcam": {
+                **_estimate_summary(webcam_estimate),
+                "selected_roi_index": webcam_roi_index,
+                "selected_roi_norm": list(
+                    latency_config.detection.webcam.roi_candidates[webcam_roi_index]
+                ),
+            },
+            "phonecam": {
+                **_estimate_summary(phonecam_estimate),
+                "selected_roi_index": phonecam_roi_index,
+                "selected_roi_norm": list(
+                    latency_config.detection.phonecam.roi_candidates[phonecam_roi_index]
+                ),
+            },
+        },
     }
     _atomic_json(paths.run_json, result)
     if status == "valid":
@@ -208,14 +256,46 @@ def _flash_canvas(capture_config: CaptureConfig, latency_config: LatencyConfig, 
     return canvas
 
 
+def _append_brightness_candidates(
+    destinations: Sequence[List[BrightnessSample]],
+    frame: np.ndarray,
+    frame_index: int,
+    timestamp_ns: int,
+    roi_candidates: Sequence[Tuple[float, float, float, float]],
+) -> None:
+    if len(destinations) != len(roi_candidates):
+        raise ValueError("Brightness destinations and ROI candidates must match.")
+    # Brightness is a spatial mean, so a small analysis frame keeps the same
+    # signal while avoiding repeated full-resolution scans for every ROI.
+    analysis_width = min(320, frame.shape[1])
+    analysis_height = max(1, round(frame.shape[0] * analysis_width / frame.shape[1]))
+    analysis_frame = cv2.resize(
+        frame,
+        (analysis_width, analysis_height),
+        interpolation=cv2.INTER_AREA,
+    )
+    for destination, roi in zip(destinations, roi_candidates):
+        destination.append(
+            BrightnessSample(
+                frame_index,
+                timestamp_ns,
+                brightness_from_frame(analysis_frame, roi),
+            )
+        )
+
+
 def run_real_latency_measurement(
     capture_config: CaptureConfig,
     latency_config: LatencyConfig,
     paths: LatencyPaths,
 ) -> Dict[str, object]:
     by_role = {camera.role: camera for camera in capture_config.cameras}
-    webcam_samples: List[BrightnessSample] = []
-    phonecam_samples: List[BrightnessSample] = []
+    webcam_sample_candidates: List[List[BrightnessSample]] = [
+        [] for _ in latency_config.detection.webcam.roi_candidates
+    ]
+    phonecam_sample_candidates: List[List[BrightnessSample]] = [
+        [] for _ in latency_config.detection.phonecam.roi_candidates
+    ]
     events: List[DisplayEvent] = []
     status = "running"
     with ExitStack() as stack:
@@ -274,25 +354,19 @@ def run_real_latency_measurement(
                 phonecam = phonecam_source.read(collection_started_ns)
                 webcam_recorder.write(webcam)
                 phonecam_recorder.write(phonecam)
-                webcam_samples.append(
-                    BrightnessSample(
-                        webcam.frame_index,
-                        webcam.unix_timestamp_ns,
-                        brightness_from_frame(
-                            webcam.frame,
-                            latency_config.detection.webcam.roi_norm,
-                        ),
-                    )
+                _append_brightness_candidates(
+                    webcam_sample_candidates,
+                    webcam.frame,
+                    webcam.frame_index,
+                    webcam.unix_timestamp_ns,
+                    latency_config.detection.webcam.roi_candidates,
                 )
-                phonecam_samples.append(
-                    BrightnessSample(
-                        phonecam.frame_index,
-                        phonecam.unix_timestamp_ns,
-                        brightness_from_frame(
-                            phonecam.frame,
-                            latency_config.detection.phonecam.roi_norm,
-                        ),
-                    )
+                _append_brightness_candidates(
+                    phonecam_sample_candidates,
+                    phonecam.frame,
+                    phonecam.frame_index,
+                    phonecam.unix_timestamp_ns,
+                    latency_config.detection.phonecam.roi_candidates,
                 )
                 if len(events) == latency_config.protocol.transition_count:
                     last_event_age_ns = time.time_ns() - events[-1].display_timestamp_ns
@@ -310,6 +384,7 @@ def run_real_latency_measurement(
             {
                 "schema_version": 1,
                 "participant": paths.participant_id,
+                "head_pose": paths.head_pose,
                 "status": status,
                 "mode": "camera",
             },
@@ -319,8 +394,8 @@ def run_real_latency_measurement(
         paths,
         latency_config,
         tuple(events),
-        tuple(webcam_samples),
-        tuple(phonecam_samples),
+        tuple(tuple(samples) for samples in webcam_sample_candidates),
+        tuple(tuple(samples) for samples in phonecam_sample_candidates),
         "camera",
     )
 
@@ -350,8 +425,8 @@ def run_latency_simulation(
         paths,
         latency_config,
         events,
-        webcam_samples,
-        phonecam_samples,
+        (webcam_samples,),
+        (phonecam_samples,),
         "simulation",
     )
 

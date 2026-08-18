@@ -1,5 +1,6 @@
 protocol:
-  transition_count: 15
+  # 여러 얼굴 위치에서도 충분한 유효 전환을 확보하도록 20회 측정합니다.
+  transition_count: 20
   # 카메라 노출이 안정되고 참가자가 자세를 고정할 준비 시간입니다.
   initial_dark_ms: 5000
   transition_interval_ms: 800
@@ -13,9 +14,22 @@ detection:
   cameras:
     webcam:
       roi_norm: [0.30, 0.18, 0.48, 0.68]
+      roi_candidates:
+        - [0.15, 0.10, 0.85, 0.90]
+        - [0.00, 0.00, 1.00, 1.00]
       min_brightness_change: 0.5
     phonecam:
-      roi_norm: [0.50, 0.15, 0.72, 0.70]
+      # 측면 카메라에서 참가자 얼굴이 위치하는 화면 오른쪽 영역입니다.
+      # 배경이 아니라 얼굴에 반사되는 검정/흰색 화면 전환을 측정합니다.
+      roi_norm: [0.65, 0.00, 0.99, 0.90]
+      # 사람의 키·앉은 위치·head pose에 따라 얼굴 위치가 달라지므로, 아래 ROI를
+      # 모두 계산하고 유효 전환 수와 MAD가 가장 좋은 영역을 자동 선택합니다.
+      roi_candidates:
+        - [0.50, 0.10, 0.90, 0.80]
+        - [0.45, 0.00, 1.00, 1.00]
+        - [0.25, 0.00, 0.75, 1.00]
+        - [0.10, 0.10, 0.60, 0.80]
+        - [0.00, 0.00, 1.00, 1.00]
       min_brightness_change: 0.5
   comparison_window_frames: 2
   max_latency_ms: 600
@@ -26,6 +40,7 @@ matching:
   max_pair_diff_ms: 40
   max_target_gap_ms: 150
   enforce_one_to_one: true
+  # 과거 dynamic_* 촬영본 호환용입니다. 현재 vertical_click_*에는 적용되지 않습니다.
   interpolate_dynamic_targets: true
 
 simulation:

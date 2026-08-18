@@ -1,0 +1,45 @@
+schema_version: webeyetrack_input_v1
+
+source:
+  camera: webcam
+  ear_threshold: 0.20
+
+eye_patch:
+  width: 512
+  height: 128
+  face_crop_size: 512
+  # WebEyeTrack 공개 전처리와 같은 수평·수직 얼굴 여백입니다.
+  padding_x: 0.40
+  padding_y: 0.20
+  image_format: png
+
+metric_head_pose:
+  method: opencv_solvepnp_mediapipe_canonical_face
+  # MediaPipe canonical face model의 좌표 단위는 cm입니다. 이 점들과
+  # Camera.mat을 이용해 카메라 좌표계의 R, t를 프레임마다 계산합니다.
+  landmark_ids: [4, 10, 33, 61, 127, 133, 152, 199, 263, 291, 356, 362]
+  canonical_points_cm:
+    - [0.000000, -0.463170, 7.586580]
+    - [0.000000, 8.261778, 4.481535]
+    - [-4.445859, 2.663991, 3.173422]
+    - [-2.456206, -4.342621, 4.283884]
+    - [-7.743095, 2.364999, -2.005167]
+    - [-1.856432, 2.585245, 3.757904]
+    - [0.000000, -9.403378, 4.264492]
+    - [0.000000, -7.942194, 5.181173]
+    - [4.445859, 2.663991, 3.173422]
+    - [2.456206, -4.342621, 4.283884]
+    - [7.743095, 2.364999, -2.005167]
+    - [1.856432, 2.585245, 3.757904]
+  left_eye_corner_ids: [263, 362]
+  right_eye_corner_ids: [33, 133]
+  min_depth_cm: 20.0
+  max_depth_cm: 120.0
+  max_mean_reprojection_error_px: 15.0
+
+output:
+  directory_name: webeyetrack
+  keep_invalid_rows: true
+  # training/evaluation 각각 이 비율보다 유효 샘플이 적으면 후처리를 실패시킵니다.
+  # 실패 시 기존 영상과 feature_maps는 그대로 보존되고 부분 결과만 삭제됩니다.
+  minimum_valid_fraction_per_split: 0.80

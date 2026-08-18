@@ -51,7 +51,7 @@ class MediaPipeFaceIrisExtractor:
             except ImportError as exc:
                 raise OptionalDependencyError(
                     "Video landmark extraction requires: "
-                    "pip install -e '.[video,landmarks]'."
+                    "pip install -e '.[landmarks]'."
                 ) from exc
             self._mediapipe = mediapipe_module
         self._processor = self._mediapipe.solutions.face_mesh.FaceMesh(
