@@ -693,7 +693,19 @@ def _run_epoch(
         subjects=subject_ids,
         screen_sizes_px=px_tensor,
         screen_sizes_mm=mm_tensor,
+        threshold_rates=_mapping(config.get("metrics"), "metrics").get("threshold_rates"),
     )
+    metric_config = _mapping(config.get("metrics"), "metrics")
+    requested = metric_config.get("report")
+    if isinstance(requested, Sequence) and not isinstance(requested, str | bytes):
+        required = {
+            str(metric_config.get("selection_metric", "euclidean_normalized_mean")),
+            str(
+                metric_config.get("fallback_selection_metric", "subject_macro_euclidean_normalized")
+            ),
+        }
+        selected_names = {str(name) for name in requested} | required
+        metrics = {name: value for name, value in metrics.items() if name in selected_names}
     return _EpochOutput(
         loss=total_loss / max(total_samples, 1),
         metrics=metrics,
@@ -725,7 +737,7 @@ def _pipeline_loss(
 
     final_prediction = _as_prediction(outputs["gaze_xy"], width=2, name="gaze_xy")
     # The configured missing-branch policy keeps a valid Front prediction when
-    # Side is closed/missing. Fusion already replaces that residual with zero.
+    # Side is invalid/missing. Fusion already replaces that residual with zero.
     final_mask = front_mask if "front_gaze_xy" in outputs else side_mask
     total = _masked_xy_loss(final_prediction, target, final_mask, primary)
     total = total * float(primary.get("weight", 1.0))
@@ -816,6 +828,7 @@ def compute_gaze_metrics(
     subjects: Sequence[str] | None = None,
     screen_sizes_px: torch.Tensor | None = None,
     screen_sizes_mm: torch.Tensor | None = None,
+    threshold_rates: Any = None,
 ) -> dict[str, float]:
     """Compute normalized metrics plus pixel/cm metrics when screen data exists."""
 
@@ -838,6 +851,8 @@ def compute_gaze_metrics(
     subject_values = list(subjects or ["unknown"] * prediction.shape[0])
     metrics["subject_macro_euclidean_normalized"] = _subject_macro(distance, subject_values)
 
+    px_distance: torch.Tensor | None = None
+    cm_distance_all: torch.Tensor | None = None
     px = _valid_size_tensor(screen_sizes_px, prediction.shape[0])
     if px is not None:
         px_error = error * px
@@ -859,9 +874,36 @@ def compute_gaze_metrics(
             metrics["p95_euclidean_cm"] = float(torch.quantile(cm_distance, 0.95))
             all_cm = torch.full_like(mm_distance, torch.nan)
             all_cm[valid_mm] = mm_distance[valid_mm] / 10.0
+            cm_distance_all = all_cm
             metrics["subject_macro_euclidean_cm"] = _subject_macro(
                 all_cm, subject_values, valid=valid_mm
             )
+    if threshold_rates is not None:
+        if not isinstance(threshold_rates, Sequence) or isinstance(threshold_rates, str | bytes):
+            raise TrainingError("metrics.threshold_rates는 mapping list여야 합니다.")
+        available = {
+            "normalized": distance,
+            "pixel": px_distance,
+            "cm": cm_distance_all,
+        }
+        for index, specification in enumerate(threshold_rates):
+            if not isinstance(specification, Mapping):
+                raise TrainingError(f"metrics.threshold_rates[{index}]는 mapping이어야 합니다.")
+            if not bool(specification.get("enabled", True)):
+                continue
+            name = str(specification.get("name", "")).strip()
+            unit = str(specification.get("unit", "normalized")).lower()
+            threshold = float(specification.get("threshold", 0.0))
+            values = available.get(unit)
+            if not name or unit not in available or threshold <= 0 or not math.isfinite(threshold):
+                raise TrainingError(
+                    f"metrics.threshold_rates[{index}]의 name/unit/threshold가 올바르지 않습니다."
+                )
+            if values is None:
+                continue
+            valid = torch.isfinite(values)
+            if bool(valid.any()):
+                metrics[name] = float((values[valid] <= threshold).float().mean())
     return metrics
 
 

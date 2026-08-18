@@ -71,6 +71,11 @@ data:
     # 화면 범위를 벗어난 label은 데이터 오류로 처리합니다.
     target_bounds_policy: error
 
+  selection:
+    # null은 전체 session을 사용합니다. 특정 head pose만 쓸 때 list로 지정합니다.
+    # 예: [head_down, neutral]
+    session_ids: null
+
   # webcam은 정면, phonecam은 90도 측면 branch로 연결합니다.
   views:
     available: [front, side]
@@ -131,7 +136,6 @@ preprocessing:
     - validate
     - face_landmarks
     - eye_selection
-    - eye_state
     - metric_head_pose
     - eye_region_warp
     - face_roi
@@ -175,19 +179,6 @@ preprocessing:
     # none은 해부학적 좌우 방향을 그대로 유지합니다.
     canonicalize_to: none
     # mark_invalid는 batch 형태를 유지하면서 유효성 mask만 끕니다.
-    on_failure: mark_invalid
-
-  eye_state:
-    # crop/warp 전에 MediaPipe 눈 윤곽점으로 EAR을 계산합니다.
-    enabled: false
-    method: ear
-    # EAR이 0.20보다 작으면 감긴 눈이며 all_open은 양쪽 눈이 모두 떠 있어야 합니다.
-    threshold: 0.20
-    required_eye_policy: all_open
-    on_closed: mark_invalid
-    landmark_indices:
-      left: [362, 385, 387, 263, 373, 380]
-      right: [133, 158, 160, 33, 144, 153]
     on_failure: mark_invalid
 
   metric_head_pose:
@@ -261,6 +252,19 @@ preprocessing:
       contrast: 0.1
       saturation: 0.1
       hue: 0.02
+
+  cache:
+    # true이면 augmentation 직전의 결정적 전처리 결과를 sample별 .pkl로 재사용합니다.
+    enabled: false
+    dir: "${paths.output_root}/preprocessed_cache"
+    # read_write: 읽기+생성, read_only: 쓰지 않음, refresh: 이 실행의 최초 접근에서 재생성
+    mode: read_write
+    format: pickle
+    schema_version: 1
+    implementation_id: ordered-gaze-preprocessor-v2
+    # pickle은 신뢰하는 로컬 cache에서만 읽습니다. 공유·다운로드 cache에는 사용하지 않습니다.
+    trusted_local: true
+    max_entry_bytes: 536870912
 
   branch_overrides:
     front:
@@ -402,7 +406,7 @@ loss:
     side_weight: 0.0
 
 metrics:
-  # train validation과 evaluate에서 prediction metric을 계산합니다.
+  # report에 적은 metric과 checkpoint 선택 metric만 계산 결과에 남깁니다.
   # cm metric에는 사람별 실제 화면 크기 정보가 필요합니다.
   selection_metric: subject_macro_euclidean_cm
   fallback_selection_metric: subject_macro_euclidean_normalized
@@ -417,6 +421,13 @@ metrics:
     - p90_euclidean_cm
     - p95_euclidean_cm
     - out_of_bounds_rate
+    - within_0_05_normalized_rate
+  # 회귀의 "정확도"는 정답과의 거리가 threshold 이내인 sample 비율로 정의합니다.
+  threshold_rates:
+    - name: within_0_05_normalized_rate
+      unit: normalized
+      threshold: 0.05
+      enabled: true
   aggregations: [sample_micro, subject_macro]
   angular_error_deg:
     # 현재 2D runner에서는 사용하지 않는 3D task 확장 계약입니다.

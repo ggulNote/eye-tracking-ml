@@ -28,7 +28,6 @@ from .profile_side import ProfileSideGeometryError, preprocess_profile_side
 from .webeyetrack_compat import (
     MediaPipeFaceLandmarkerDetector,
     WebEyeTrackGeometryError,
-    compute_ear,
     estimate_metric_face_origin,
     head_vector_from_face_rt,
     select_eye,
@@ -68,7 +67,6 @@ _STAGES = (
     "validate",
     "face_landmarks",
     "eye_selection",
-    "eye_state",
     "metric_head_pose",
     "eye_region_warp",
     "face_roi",
@@ -678,7 +676,6 @@ class OrderedGazePreprocessor:
         positions = {stage: index for index, stage in enumerate(self.stage_order)}
         for dependent in (
             "eye_selection",
-            "eye_state",
             "metric_head_pose",
             "eye_region_warp",
             "face_roi",
@@ -786,6 +783,22 @@ class OrderedGazePreprocessor:
         return context
 
     def __call__(self, sample: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+        """Run deterministic preprocessing followed by optional augmentation."""
+
+        processed = self.preprocess_deterministic(sample)
+        return self.apply_augmentation(processed)
+
+    def preprocess_deterministic(
+        self, sample: MutableMapping[str, Any]
+    ) -> MutableMapping[str, Any]:
+        """Run the deterministic prefix immediately before ``augment``.
+
+        The returned mapping is the stable cache boundary. Dataset callers may
+        serialize it and resume the remaining ordered stages after a cache hit,
+        so stochastic training transforms are never frozen in a pickle.  When
+        augmentation is disabled, all deterministic stages are executed here.
+        """
+
         if not isinstance(sample, MutableMapping):
             raise TypeError("preprocessor expects a mutable sample mapping")
         view = str(sample.get("view", _metadata(sample).get("view", "front"))).lower()
@@ -805,15 +818,44 @@ class OrderedGazePreprocessor:
             stage_config = self._stage_config(stage, view)
             if not _enabled(stage_config):
                 continue
+            if stage == "augment":
+                break
             getattr(self, f"_stage_{stage}")(sample, stage_config)
 
         if "image" not in sample:
             raise SampleValidationError(
                 "preprocessing produced no image; enable 'decode' or provide sample['image']"
             )
+        if branch.get("representation") and not self._enabled_augment_for_view(view):
+            _metadata(sample)["representation"] = str(branch["representation"])
+        return sample
+
+    def apply_augmentation(self, sample: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+        """Resume the ordered pipeline at ``augment`` for the current epoch."""
+
+        if not isinstance(sample, MutableMapping):
+            raise TypeError("preprocessor expects a mutable sample mapping")
+        view = str(sample.get("view", _metadata(sample).get("view", "front"))).lower()
+        if not self._enabled_augment_for_view(view):
+            sample.pop("_augmentation_context", None)
+            return sample
+        augment_index = self.stage_order.index("augment")
+        for stage in self.stage_order[augment_index:]:
+            config = self._stage_config(stage, view)
+            if _enabled(config):
+                getattr(self, f"_stage_{stage}")(sample, config)
+        branch = _mapping(
+            _mapping(self.config.get("branch_overrides"), name="branch_overrides").get(view),
+            name=f"branch_overrides.{view}",
+        )
         if branch.get("representation"):
             _metadata(sample)["representation"] = str(branch["representation"])
         return sample
+
+    def _enabled_augment_for_view(self, view: str) -> bool:
+        """Return whether the ordered pipeline has an enabled augment stage."""
+
+        return "augment" in self.stage_order and _enabled(self._stage_config("augment", view))
 
     def _stage_decode(self, sample: MutableMapping[str, Any], config: Mapping[str, Any]) -> None:
         if sample.get("image") is not None:
@@ -1085,80 +1127,79 @@ class OrderedGazePreprocessor:
                 f"min_visibility={minimum_visibility:.3f}",
             )
 
-    def _stage_eye_state(self, sample: MutableMapping[str, Any], config: Mapping[str, Any]) -> None:
-        landmarks = _get_landmarks(sample)
-        metadata = _metadata(sample)
-        if landmarks is None:
-            _handle_quality_failure("eye_state", sample, config, "facial landmarks are unavailable")
-            return
-        index_config = _mapping(config.get("landmark_indices"), name="eye_state.landmark_indices")
-        try:
-            ear_left = compute_ear(
-                landmarks,
-                "left",
-                indices=index_config.get("left"),
-            )
-            ear_right = compute_ear(
-                landmarks,
-                "right",
-                indices=index_config.get("right"),
-            )
-        except WebEyeTrackGeometryError as exc:
-            metadata["ear"] = np.asarray([np.nan, np.nan], dtype=np.float32)
-            metadata["eye_open_mask"] = np.asarray([False, False], dtype=bool)
-            metadata["eye_state_valid"] = False
-            _handle_quality_failure("eye_state", sample, config, str(exc))
-            return
-
-        threshold = float(config.get("threshold", 0.20))
-        if threshold <= 0:
-            raise TransformConfigError("eye_state.threshold must be greater than zero")
-        ears = np.asarray([ear_left, ear_right], dtype=np.float32)
-        open_mask = ears >= threshold
-        policy = str(config.get("required_eye_policy", "all_open")).lower()
-        selected_eye = str(metadata.get("selected_eye", "both")).lower()
-        if policy in {"all_open", "both_open", "webeyetrack"}:
-            accepted = bool(open_mask.all())
-        elif policy in {"any_open", "either_open"}:
-            accepted = bool(open_mask.any())
-        elif policy in {"selected_eye_open", "selected_open"}:
-            if selected_eye not in {"left", "right"}:
-                raise TransformConfigError(
-                    "eye_state.required_eye_policy=selected_eye_open requires "
-                    "eye_selection to choose left or right"
-                )
-            accepted = bool(open_mask[0 if selected_eye == "left" else 1])
-        else:
-            raise TransformConfigError(
-                "eye_state.required_eye_policy must be all_open, any_open, or selected_eye_open"
-            )
-
-        metadata["ear"] = ears
-        metadata["eye_open_mask"] = open_mask.astype(bool)
-        metadata["ear_threshold"] = threshold
-        metadata["eye_state_valid"] = True
-        metadata["gaze_state"] = "open" if accepted else "closed"
-        if accepted:
-            return
-
-        closed_policy = str(config.get("on_closed", "mark_invalid")).lower()
-        if closed_policy in {"mark_invalid", "mask", "suppress"}:
-            _mark_gaze_invalid(sample, "eye_state:required_eye_closed")
-        elif closed_policy == "drop":
-            raise SampleDroppedError("preprocessing stage 'eye_state' rejected a closed-eye sample")
-        elif closed_policy == "error":
-            raise SampleValidationError(
-                "preprocessing stage 'eye_state' rejected a closed-eye sample"
-            )
-        elif closed_policy not in {"keep", "ignore"}:
-            raise TransformConfigError(
-                "eye_state.on_closed must be mark_invalid, drop, error, or keep"
-            )
-
     def _stage_metric_head_pose(
         self, sample: MutableMapping[str, Any], config: Mapping[str, Any]
     ) -> None:
         metadata = _metadata(sample)
+        pose_source = str(config.get("source", "reconstruct")).lower()
+        if pose_source in {"precomputed", "precomputed_only", "precomputed_or_reconstruct"}:
+            try:
+                precomputed_head = np.asarray(
+                    metadata.get("head_vector"), dtype=np.float32
+                ).reshape(3)
+                precomputed_origin = np.asarray(
+                    metadata.get("face_origin_3d"), dtype=np.float32
+                ).reshape(3)
+                head_norm = float(np.linalg.norm(precomputed_head))
+                orientation_valid = bool(
+                    metadata.get("head_orientation_valid", np.isfinite(precomputed_head).all())
+                )
+                origin_valid = bool(
+                    metadata.get("face_origin_valid", np.isfinite(precomputed_origin).all())
+                )
+                pose_valid = bool(
+                    metadata.get("head_pose_valid", orientation_valid and origin_valid)
+                )
+                precomputed_valid = bool(
+                    orientation_valid
+                    and origin_valid
+                    and pose_valid
+                    and np.isfinite(precomputed_head).all()
+                    and np.isfinite(precomputed_origin).all()
+                    and head_norm > 1e-8
+                )
+            except (TypeError, ValueError):
+                precomputed_valid = False
+
+            if precomputed_valid:
+                origin_unit = str(
+                    metadata.get(
+                        "face_origin_unit",
+                        config.get("precomputed_face_origin_unit", "cm"),
+                    )
+                ).lower()
+                if origin_unit in {"mm", "millimeter", "millimetre"}:
+                    precomputed_origin = precomputed_origin / 10.0
+                elif origin_unit not in {"cm", "centimeter", "centimetre"}:
+                    raise TransformConfigError(
+                        "metric_head_pose precomputed face_origin_unit must be mm or cm"
+                    )
+                metadata["head_vector"] = (precomputed_head / head_norm).astype(np.float32)
+                metadata["face_origin_3d"] = precomputed_origin.astype(np.float32)
+                metadata["face_origin_unit"] = "cm"
+                metadata["face_origin_source"] = str(
+                    metadata.get("face_origin_source", "precomputed_manifest")
+                )
+                metadata["head_orientation_valid"] = True
+                metadata["face_origin_valid"] = True
+                metadata["head_pose_valid"] = True
+                return
+
+            if pose_source in {"precomputed", "precomputed_only"}:
+                metadata["head_vector"] = np.full(3, np.nan, dtype=np.float32)
+                metadata["head_euler_degrees"] = np.full(3, np.nan, dtype=np.float32)
+                metadata["face_origin_3d"] = np.full(3, np.nan, dtype=np.float32)
+                metadata["head_orientation_valid"] = False
+                metadata["face_origin_valid"] = False
+                metadata["head_pose_valid"] = False
+                _handle_quality_failure(
+                    "metric_head_pose",
+                    sample,
+                    config,
+                    "valid precomputed head_vector and face_origin_3d are unavailable",
+                )
+                return
+
         face_rt = metadata.get("face_rt")
         normalized_xyz = metadata.get("landmarks_xyz_normalized")
         if face_rt is None:
@@ -1351,7 +1392,6 @@ class OrderedGazePreprocessor:
                     metadata["eye_angles"] = np.full(2, np.nan, dtype=np.float32)
                 if extract_iris_pose:
                     metadata["iris_pose_2d"] = np.full(2, np.nan, dtype=np.float32)
-                metadata["eye_state_valid"] = False
                 metadata["eye_selection_valid"] = False
                 if mark_invalid_warp(str(exc), [128, 256]):
                     return
@@ -1368,25 +1408,11 @@ class OrderedGazePreprocessor:
                     metadata["eye_angles"] = np.full(2, np.nan, dtype=np.float32)
                 if extract_iris_pose:
                     metadata["iris_pose_2d"] = np.full(2, np.nan, dtype=np.float32)
-                metadata["eye_state_valid"] = False
                 metadata["eye_selection_valid"] = False
                 if mark_invalid_warp(reason, [128, 256]):
                     return
                 _handle_failure("eye_region_warp", config, reason)
                 return
-
-            threshold = float(config.get("ear_threshold", 0.20))
-            if threshold <= 0:
-                raise TransformConfigError(
-                    "eye_region_warp.ear_threshold must be greater than zero"
-                )
-            ear = float(result.ear) if result.ear is not None else np.nan
-            eye_is_open = bool(np.isfinite(ear) and ear >= threshold)
-            eye_index = 0 if selected_eye == "left" else 1
-            ears = np.full(2, np.nan, dtype=np.float32)
-            ears[eye_index] = ear
-            eye_open_mask = np.zeros(2, dtype=bool)
-            eye_open_mask[eye_index] = eye_is_open
 
             sample["image"] = result.patch
             source_quad = np.asarray(result.source_quad_xy, dtype=np.float32)
@@ -1412,16 +1438,8 @@ class OrderedGazePreprocessor:
                 )
             metadata["selected_eye"] = selected_eye
             metadata["eye_selection_valid"] = True
-            metadata["ear"] = ears
-            metadata["ear_threshold"] = threshold
-            metadata["eye_open_mask"] = eye_open_mask
-            metadata["eye_state_valid"] = bool(result.ear is not None)
-            metadata["gaze_state"] = (
-                "unknown" if result.ear is None else ("open" if eye_is_open else "closed")
-            )
             metadata["eye_patch_source_quad_xy"] = source_quad
             metadata["profile_eye_size_xy"] = np.asarray(result.eye_size_xy, dtype=np.float32)
-            metadata["profile_eye_ear"] = ear
             metadata["head_pitch_proxy_degrees"] = result.head_pitch_proxy_degrees
             if result.eyelid_tail_points_xy is not None:
                 metadata["eyelid_tail_points_xy"] = np.asarray(
@@ -1433,28 +1451,6 @@ class OrderedGazePreprocessor:
                 metadata["eyelid_included_angle"] = result.eyelid_tail_angle_normalized
                 metadata["eyelid_included_angle_degrees"] = result.eyelid_tail_angle_degrees
 
-            if eye_is_open:
-                return
-            rejection_reason = (
-                "eye_state:selected_profile_eye_ear_unavailable"
-                if result.ear is None
-                else "eye_state:selected_profile_eye_closed"
-            )
-            closed_policy = str(config.get("on_closed", "mark_invalid")).lower()
-            if closed_policy in {"mark_invalid", "mask", "suppress"}:
-                _mark_gaze_invalid(sample, rejection_reason)
-            elif closed_policy == "drop":
-                raise SampleDroppedError(
-                    "preprocessing stage 'eye_region_warp' rejected a closed profile eye"
-                )
-            elif closed_policy == "error":
-                raise SampleValidationError(
-                    "preprocessing stage 'eye_region_warp' rejected a closed profile eye"
-                )
-            elif closed_policy not in {"keep", "ignore"}:
-                raise TransformConfigError(
-                    "eye_region_warp.on_closed must be mark_invalid, drop, error, or keep"
-                )
             return
 
         landmarks = _get_landmarks(sample)

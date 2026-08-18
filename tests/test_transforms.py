@@ -165,6 +165,65 @@ def test_metric_head_pose_exposes_orientation_validity_independently() -> None:
     assert np.isfinite(orientation_only["metadata"]["head_vector"]).all()
 
 
+def test_metric_head_pose_preserves_valid_precomputed_pose_without_face_rt() -> None:
+    preprocessor = OrderedGazePreprocessor({"stage_order": []}, split="validation")
+    sample_with_pose = {
+        "image": np.zeros((32, 32, 3), dtype=np.uint8),
+        "metadata": {
+            "head_vector": np.asarray([0.0, -2.0, 0.0], dtype=np.float32),
+            "face_origin_3d": np.asarray([10.0, 20.0, 600.0], dtype=np.float32),
+            "face_origin_unit": "mm",
+            "head_orientation_valid": True,
+            "face_origin_valid": True,
+            "head_pose_valid": True,
+        },
+    }
+
+    preprocessor._stage_metric_head_pose(
+        sample_with_pose,
+        {"source": "precomputed_or_reconstruct", "on_failure": "error"},
+    )
+
+    assert sample_with_pose["metadata"]["head_vector"].tolist() == pytest.approx([0.0, -1.0, 0.0])
+    assert sample_with_pose["metadata"]["face_origin_3d"].tolist() == pytest.approx(
+        [1.0, 2.0, 60.0]
+    )
+    assert sample_with_pose["metadata"]["face_origin_unit"] == "cm"
+    assert sample_with_pose["metadata"]["head_pose_valid"] is True
+
+
+def test_metric_head_pose_reconstructs_when_precomputed_pose_is_invalid() -> None:
+    preprocessor = OrderedGazePreprocessor({"stage_order": []}, split="validation")
+    sample_with_fallback = {
+        "image": np.zeros((32, 32, 3), dtype=np.uint8),
+        "metadata": {
+            "head_vector": np.full(3, np.nan, dtype=np.float32),
+            "face_origin_3d": np.full(3, np.nan, dtype=np.float32),
+            "head_pose_valid": False,
+            "face_rt": np.eye(4, dtype=np.float32),
+            "face_center_3d": np.asarray([10.0, 20.0, 600.0], dtype=np.float32),
+        },
+    }
+
+    preprocessor._stage_metric_head_pose(
+        sample_with_fallback,
+        {
+            "source": "precomputed_or_reconstruct",
+            "face_origin_source": "annotation",
+            "annotation_unit": "mm",
+            "on_failure": "error",
+        },
+    )
+
+    assert sample_with_fallback["metadata"]["head_vector"].tolist() == pytest.approx(
+        [0.0, 0.0, -1.0]
+    )
+    assert sample_with_fallback["metadata"]["face_origin_3d"].tolist() == pytest.approx(
+        [1.0, 2.0, 60.0]
+    )
+    assert sample_with_fallback["metadata"]["face_origin_source"] == "annotation"
+
+
 def test_front_and_side_haar_detectors_keep_branch_specific_configs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -313,8 +372,6 @@ def _profile90_config(*, on_failure: str = "error") -> dict[str, object]:
                 "side_eyeangle": {"enabled": True},
                 "side_eyelidangle": {"enabled": True, "vertical_only": True},
             },
-            "ear_threshold": 0.2,
-            "on_closed": "mark_invalid",
             "on_failure": on_failure,
         },
         "normalize": {
@@ -361,7 +418,6 @@ def test_profile90_annotation_stage_returns_eye_patch_and_selected_features() ->
     assert output["image"].shape == (3, 128, 256)
     assert output["metadata"]["representation"] == "profile90_selectable_features_v3"
     assert output["metadata"]["selected_eye"] == "right"
-    assert output["metadata"]["ear"].tolist() == pytest.approx([np.nan, 0.3], nan_ok=True)
     assert output["metadata"]["head_pose_2d"].tolist() == pytest.approx([-(2**-0.5), -(2**-0.5)])
     assert output["metadata"]["head_pose_2d_valid"] is True
     assert "head_pose_valid" not in output["metadata"]
@@ -380,17 +436,6 @@ def test_profile90_annotation_stage_returns_eye_patch_and_selected_features() ->
     )
     assert output["metadata"]["head_pitch_proxy_degrees"] == pytest.approx(45.0)
     assert output["metadata"]["gaze_valid"] is True
-
-
-def test_profile90_closed_eye_is_kept_but_excluded_from_gaze_loss() -> None:
-    output = OrderedGazePreprocessor(_profile90_config(), split="validation")(
-        _profile90_sample(closed=True)
-    )
-
-    assert output["image"].shape == (3, 128, 256)
-    assert output["metadata"]["gaze_state"] == "closed"
-    assert output["metadata"]["gaze_valid"] is False
-    assert "eye_state:selected_profile_eye_closed" in output["metadata"]["invalid_reasons"]
 
 
 def test_profile90_horizontal_flip_mirrors_pose_and_eye_side() -> None:
@@ -413,6 +458,39 @@ def test_profile90_horizontal_flip_mirrors_pose_and_eye_side() -> None:
     )
     assert output["metadata"]["selected_eye"] == "left"
     assert output["metadata"]["visible_eye"] == "left"
+
+
+def test_augment_before_mean_std_normalize_preserves_configured_stage_order() -> None:
+    config = {
+        "stage_order": ["decode", "augment", "normalize"],
+        "decode": {"enabled": True},
+        "augment": {
+            "enabled": True,
+            "apply_to": "train_only",
+            "horizontal_flip_probability": 1.0,
+            # Zero magnitude still executes the color-jitter conversion path.
+            # This raises if mean/std normalization ran before augmentation.
+            "color_jitter": {"enabled": True, "brightness": 0.0},
+        },
+        "normalize": {
+            "enabled": True,
+            "mode": "mean_std",
+            "mean": [0.5, 0.5, 0.5],
+            "std": [0.25, 0.25, 0.25],
+            "channel_order": "CHW",
+        },
+    }
+    image = np.zeros((2, 3, 3), dtype=np.uint8)
+    image[:, 0] = 255
+
+    output = OrderedGazePreprocessor(config, split="train")(
+        {"image": image, "view": "front", "metadata": {}}
+    )
+
+    tensor = output["image"]
+    assert tensor.shape == (3, 2, 3)
+    assert torch.all(tensor[:, :, 0] == -2.0)
+    assert torch.all(tensor[:, :, -1] == 2.0)
 
 
 def test_profile90_missing_annotation_can_return_fixed_invalid_patch() -> None:

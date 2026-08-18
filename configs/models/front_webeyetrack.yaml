@@ -1,0 +1,20 @@
+# 공식 WebEyeTrack BlazeGaze Front 모델만 선택하는 model profile입니다.
+# 데이터·split·전처리 설정과 분리하여 profile merge 시 stale init_args가 남지 않게 합니다.
+
+model:
+  front:
+    enabled: true
+    source_dir: null
+    entrypoint: gaze_pipeline.models.webeyetrack_front:create_model
+    adapter_entrypoint: null
+    init_args:
+      # 공식 Keras archive를 Keras 3의 torch backend로 로딩합니다.
+      weights_path: "${oc.env:WEBEYETRACK_WEIGHTS,./models/blazegaze_mpiifacegaze.keras}"
+      expected_sha256: 5b011cfe82466896e27b1ac3e18130117cafbc02dbc964a1ad7315f62005cc05
+      # 첫 연결 검증에서는 encoder를 고정하고, 필요할 때만 true로 변경합니다.
+      unfreeze_encoder: false
+    # .keras는 factory가 직접 검증하므로 generic .pt loader는 사용하지 않습니다.
+    pretrained:
+      path: null
+      sha256: null
+      strict: true

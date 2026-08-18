@@ -73,6 +73,32 @@ def test_gaze_metrics_report_normalized_pixel_cm_and_subject_macro() -> None:
     assert math.isfinite(metrics["p95_euclidean_cm"])
 
 
+def test_gaze_metrics_support_configured_threshold_accuracy_rates() -> None:
+    prediction = torch.tensor([[0.03, 0.04], [0.20, 0.00]])
+    target = torch.zeros_like(prediction)
+
+    metrics = compute_gaze_metrics(
+        prediction,
+        target,
+        screen_sizes_px=torch.tensor([[1000.0, 500.0], [1000.0, 500.0]]),
+        threshold_rates=[
+            {
+                "name": "within_0_05_normalized_rate",
+                "unit": "normalized",
+                "threshold": 0.05,
+            },
+            {
+                "name": "within_100_pixel_rate",
+                "unit": "pixel",
+                "threshold": 100.0,
+            },
+        ],
+    )
+
+    assert metrics["within_0_05_normalized_rate"] == pytest.approx(0.5)
+    assert metrics["within_100_pixel_rate"] == pytest.approx(0.5)
+
+
 def test_pipeline_checkpoint_round_trip(tmp_path: Path) -> None:
     front = torch.nn.Linear(2, 2)
     side = torch.nn.Linear(2, 1)

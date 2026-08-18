@@ -15,27 +15,22 @@ GAZE_OUTPUT_ROOT ?= $(PROJECT_ROOT)/outputs
 MLFLOW_DB ?= $(PROJECT_ROOT)/mlflow.db
 MLFLOW_TRACKING_URI ?= sqlite:///$(MLFLOW_DB)
 MLFLOW_PORT ?= 5000
-DEMO_ROOT ?= $(PROJECT_ROOT)/.demo/two_images
-DEMO_DB ?= $(DEMO_ROOT)/mlflow-demo.db
-DEMO_PROFILE := $(PROJECT_ROOT)/configs/profiles/demo_two_images.yaml
 DUAL_DEMO_ROOT ?= $(PROJECT_ROOT)/.demo/dual_view_training
 DUAL_DEMO_DB ?= $(DUAL_DEMO_ROOT)/mlflow-training-demo.db
 DUAL_DEMO_PROFILE := $(PROJECT_ROOT)/configs/profiles/demo_dual_view_training.yaml
-DATA_VER1_ROOT ?= $(PROJECT_ROOT)/../project_data/data(ver1)
-DATA_VER1_SMOKE_ROOT ?= $(PROJECT_ROOT)/.demo/data_ver1_smoke
-DATA_VER1_MANIFEST ?= $(DATA_VER1_SMOKE_ROOT)/manifest.csv
-DATA_VER1_OUTPUT ?= $(DATA_VER1_SMOKE_ROOT)/outputs
-DATA_VER1_DB ?= $(DATA_VER1_SMOKE_ROOT)/mlflow.db
-DATA_VER1_PROFILE := $(PROJECT_ROOT)/configs/profiles/data_ver1_smoke.yaml
-DATA_VER1_PREVIEW_OUTPUT ?= $(PROJECT_ROOT)/outputs/preprocessing_ver1_preview
-EXAMPLE_ROOT ?= $(PROJECT_ROOT)/../project_data/example
-PREVIEW_OUTPUT ?= $(PROJECT_ROOT)/outputs/preprocessing_preview
-PREVIEW_ONLY ?=
-PROFILE90_PREVIEW_OUTPUT ?= $(PROJECT_ROOT)/outputs/profile90_preprocessing
-PROFILE90_ANNOTATIONS ?= $(PROJECT_ROOT)/configs/examples/profile90_annotations.yaml
-PROFILE90_FRONT_PROFILE ?= $(PROJECT_ROOT)/configs/profiles/blazegaze.yaml
-PROFILE90_POSE_GRID_ANNOTATIONS ?= $(PROJECT_ROOT)/configs/examples/profile90_pose_grid_annotations.yaml
-PROFILE90_POSE_GRID_OUTPUT ?= $(PROJECT_ROOT)/outputs/profile90_pose_grid
+MEASURED_DATA_ROOT ?= $(PROJECT_ROOT)/../project_data/data
+MEASURED_RUN_ROOT ?= $(PROJECT_ROOT)/.demo/measured_head_down_neutral
+MEASURED_DATA_MANIFEST ?= $(MEASURED_RUN_ROOT)/manifest.csv
+MEASURED_OUTPUT ?= $(MEASURED_RUN_ROOT)/outputs
+MEASURED_DB ?= $(MEASURED_RUN_ROOT)/mlflow.db
+MEASURED_PREVIEW_OUTPUT ?= $(PROJECT_ROOT)/outputs/measured_preprocessing_preview
+MEASURED_DATA_PROFILE := $(PROJECT_ROOT)/configs/profiles/measured_head_down_neutral.yaml
+SIDE_ANNOTATIONS ?= $(MEASURED_DATA_ROOT)/side_annotations.csv
+FRONT_PREPROCESS_PROFILE := $(PROJECT_ROOT)/configs/profiles/blazegaze.yaml
+FRONT_MODEL_PROFILE := $(PROJECT_ROOT)/configs/models/front_webeyetrack.yaml
+SIDE_PREPROCESS_PROFILE := $(PROJECT_ROOT)/configs/profiles/side_profile_90.yaml
+SIDE_ROI_PROFILE := $(PROJECT_ROOT)/configs/profiles/side_roi_only.yaml
+SIDE_MODEL_PROFILE ?= $(PROJECT_ROOT)/configs/models/side_mobilenet_v4.yaml
 WEBEYETRACK_ASSET_DIR ?= $(PROJECT_ROOT)/models
 MEDIAPIPE_FACE_MODEL ?= $(WEBEYETRACK_ASSET_DIR)/face_landmarker_v2_with_blendshapes.task
 WEBEYETRACK_WEIGHTS ?= $(WEBEYETRACK_ASSET_DIR)/blazegaze_mpiifacegaze.keras
@@ -43,15 +38,14 @@ CHECKPOINT ?=
 EVAL_SPLIT ?= test
 OVERRIDES ?=
 PROFILE_ARG = $(if $(strip $(PROFILE)),--profile "$(PROFILE)",) $(foreach item,$(PROFILES),--profile "$(item)")
-PREVIEW_ONLY_ARG = $(if $(strip $(PREVIEW_ONLY)),--only-profile "$(PREVIEW_ONLY)",)
 CHECKPOINT_ARG = $(if $(strip $(CHECKPOINT)),--checkpoint "$(CHECKPOINT)",)
 
 .PHONY: help paths show-paths setup setup-dev require-venv require-data \
 	check-setup validate-config validate prepare train evaluate mlflow-check check-mlflow \
-	mlflow-ui demo-two-images demo-dual-train demo-mlflow-check demo-mlflow-ui \
-	data-ver1-manifest data-ver1-prepare data-ver1-preview data-ver1-smoke \
-	webeyetrack-assets check-webeyetrack-assets preprocess-preview \
-	preprocess-profile90-preview preprocess-profile90-pose-grid \
+	mlflow-ui demo-dual-train \
+	measured-manifest measured-prepare measured-preview measured-train measured-evaluate \
+	measured-mlflow-ui \
+	webeyetrack-assets check-webeyetrack-assets \
 	test lint format-check check clean-cache
 
 help:
@@ -66,14 +60,14 @@ help:
 	@echo "  make evaluate       CHECKPOINT 또는 config 기본 checkpoint의 validation/test 평가"
 	@echo "  make mlflow-check   SQLite DB와 FINISHED run 확인"
 	@echo "  make mlflow-ui      http://127.0.0.1:5000 UI 실행"
-	@echo "  make demo-two-images 합성 이미지 2장으로 별도 MLflow DB smoke test"
 	@echo "  make demo-dual-train 합성 Front/Side DB와 내장 fallback 모델의 Y축 fusion smoke test"
-	@echo "  make data-ver1-preview p00/p03 실제 전처리 단계별 이미지 생성"
-	@echo "  make data-ver1-smoke 실제 WebEyeTrack Front + 간단한 Side의 학습·평가·MLflow 검사"
+	@echo "  make measured-manifest 이름별 DB의 head_down·neutral canonical manifest 생성"
+	@echo "  make measured-prepare 피험자 단위 train/validation/test split과 pairing 검증"
+	@echo "  make measured-preview inputs.csv 기반 실제 Front 전처리와 Side 상태 plot"
+	@echo "  make measured-train Side annotation 준비 후 선택한 Side Encoder로 전체 학습"
+	@echo "  make measured-evaluate CHECKPOINT=... 같은 Config로 validation/test 평가"
+	@echo "  make measured-mlflow-ui 측정 DB 전용 MLflow UI 실행"
 	@echo "  make webeyetrack-assets 공식 MediaPipe/BlazeGaze asset 다운로드+SHA 검증"
-	@echo "  make preprocess-preview 실제 BlazeGaze/front·side 단계별 전처리 plot"
-	@echo "  make preprocess-profile90-preview front 2장 + 등록된 strict 90° side 전체 plot"
-	@echo "  make preprocess-profile90-pose-grid strict side head×eye 3×3 vector plot"
 	@echo "  make clean-cache    Python/test/lint cache와 egg-info 제거"
 	@echo "  make check          config/unit/lint/format 전체 검사"
 	@echo
@@ -92,22 +86,15 @@ paths:
 	@echo "GAZE_OUTPUT_ROOT=$(GAZE_OUTPUT_ROOT)"
 	@echo "MLFLOW_DB=$(MLFLOW_DB)"
 	@echo "MLFLOW_TRACKING_URI=$(MLFLOW_TRACKING_URI)"
-	@echo "DEMO_ROOT=$(DEMO_ROOT)"
-	@echo "DEMO_DB=$(DEMO_DB)"
 	@echo "DUAL_DEMO_ROOT=$(DUAL_DEMO_ROOT)"
 	@echo "DUAL_DEMO_DB=$(DUAL_DEMO_DB)"
-	@echo "DATA_VER1_ROOT=$(DATA_VER1_ROOT)"
-	@echo "DATA_VER1_MANIFEST=$(DATA_VER1_MANIFEST)"
-	@echo "DATA_VER1_OUTPUT=$(DATA_VER1_OUTPUT)"
-	@echo "DATA_VER1_DB=$(DATA_VER1_DB)"
-	@echo "DATA_VER1_PREVIEW_OUTPUT=$(DATA_VER1_PREVIEW_OUTPUT)"
-	@echo "EXAMPLE_ROOT=$(EXAMPLE_ROOT)"
-	@echo "PREVIEW_OUTPUT=$(PREVIEW_OUTPUT)"
-	@echo "PROFILE90_PREVIEW_OUTPUT=$(PROFILE90_PREVIEW_OUTPUT)"
-	@echo "PROFILE90_ANNOTATIONS=$(PROFILE90_ANNOTATIONS)"
-	@echo "PROFILE90_FRONT_PROFILE=$(PROFILE90_FRONT_PROFILE)"
-	@echo "PROFILE90_POSE_GRID_ANNOTATIONS=$(PROFILE90_POSE_GRID_ANNOTATIONS)"
-	@echo "PROFILE90_POSE_GRID_OUTPUT=$(PROFILE90_POSE_GRID_OUTPUT)"
+	@echo "MEASURED_DATA_ROOT=$(MEASURED_DATA_ROOT)"
+	@echo "MEASURED_DATA_MANIFEST=$(MEASURED_DATA_MANIFEST)"
+	@echo "MEASURED_OUTPUT=$(MEASURED_OUTPUT)"
+	@echo "MEASURED_DB=$(MEASURED_DB)"
+	@echo "MEASURED_PREVIEW_OUTPUT=$(MEASURED_PREVIEW_OUTPUT)"
+	@echo "SIDE_ANNOTATIONS=$(SIDE_ANNOTATIONS)"
+	@echo "SIDE_MODEL_PROFILE=$(SIDE_MODEL_PROFILE)"
 	@echo "MEDIAPIPE_FACE_MODEL=$(MEDIAPIPE_FACE_MODEL)"
 	@echo "WEBEYETRACK_WEIGHTS=$(WEBEYETRACK_WEIGHTS)"
 	@echo "CHECKPOINT=$(if $(strip $(CHECKPOINT)),$(CHECKPOINT),<config-default>)"
@@ -163,88 +150,90 @@ mlflow-ui: require-venv
 	@echo "MLflow UI: http://127.0.0.1:$(MLFLOW_PORT)"
 	@"$(VENV_MLFLOW)" ui --backend-store-uri "$(MLFLOW_TRACKING_URI)" --port "$(MLFLOW_PORT)"
 
-demo-two-images: require-venv
-	@"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/create_two_image_demo.py" --output-root "$(DEMO_ROOT)"
-	@cd "$(DEMO_ROOT)" && GAZE_DATA_ROOT="$(DEMO_ROOT)" GAZE_OUTPUT_ROOT="$(DEMO_ROOT)/outputs" DEMO_MANIFEST="$(DEMO_ROOT)/manifest.csv" MLFLOW_TRACKING_URI="sqlite:///$(DEMO_DB)" "$(VENV_PYTHON)" -m gaze_pipeline prepare --config "$(CONFIG)" --profile "$(DEMO_PROFILE)"
-	@$(MAKE) --no-print-directory demo-mlflow-check VENV="$(VENV)" DEMO_ROOT="$(DEMO_ROOT)" DEMO_DB="$(DEMO_DB)"
-	@echo "Demo UI: make demo-mlflow-ui"
-
 demo-dual-train: require-venv
 	@"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/create_dual_view_training_demo.py" --output-root "$(DUAL_DEMO_ROOT)"
 	@DUAL_DEMO_MANIFEST="$(DUAL_DEMO_ROOT)/manifest.csv" GAZE_DATA_ROOT="$(DUAL_DEMO_ROOT)" GAZE_OUTPUT_ROOT="$(DUAL_DEMO_ROOT)/outputs" MLFLOW_TRACKING_URI="sqlite:///$(DUAL_DEMO_DB)" "$(VENV_PYTHON)" -m gaze_pipeline train --config "$(CONFIG)" --profile "$(DUAL_DEMO_PROFILE)" $(OVERRIDES)
 	@MLFLOW_TRACKING_URI="sqlite:///$(DUAL_DEMO_DB)" "$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/check_mlflow.py" --require-db
 
-data-ver1-manifest: require-venv
-	@if [[ ! -d "$(DATA_VER1_ROOT)" ]]; then echo "data(ver1) 폴더가 없습니다: $(DATA_VER1_ROOT)"; exit 2; fi
-	@"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/create_data_ver1_manifest.py" \
-		--source-root "$(DATA_VER1_ROOT)" \
-		--output-manifest "$(DATA_VER1_MANIFEST)" \
-		--dummy-side-annotations --force
+measured-manifest: require-venv
+	@if [[ ! -d "$(MEASURED_DATA_ROOT)" ]]; then echo "측정 DB 폴더가 없습니다: $(MEASURED_DATA_ROOT)"; exit 2; fi
+	@if [[ ! -f "$(SIDE_ANNOTATIONS)" ]]; then echo "Side bbox annotation CSV가 없습니다: $(SIDE_ANNOTATIONS)"; echo "필수 열: sample_id, visible_eye, visible_eye_bbox_xyxy, eye_annotation_valid"; exit 2; fi
+	@mkdir -p "$(MEASURED_RUN_ROOT)"
+	@"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/create_measured_data_manifest.py" \
+		--source-root "$(MEASURED_DATA_ROOT)" \
+		--output-manifest "$(MEASURED_DATA_MANIFEST)" \
+		--sessions head_down neutral --side-annotations "$(SIDE_ANNOTATIONS)" \
+		--require-front-pose --require-side-annotations --force
 
-data-ver1-preview: require-venv check-webeyetrack-assets
-	@MPLCONFIGDIR="$(DATA_VER1_SMOKE_ROOT)/matplotlib" "$(VENV_PYTHON)" \
-		"$(PROJECT_ROOT)/scripts/preview_data_ver1_preprocessing.py" \
-		--data-root "$(DATA_VER1_ROOT)" \
-		--output-dir "$(DATA_VER1_PREVIEW_OUTPUT)" \
-		--samples 2 --overwrite-generated
-
-data-ver1-prepare: data-ver1-manifest check-webeyetrack-assets
-	@GAZE_DATA_ROOT="$(DATA_VER1_ROOT)" DATA_VER1_MANIFEST="$(DATA_VER1_MANIFEST)" \
-		GAZE_OUTPUT_ROOT="$(DATA_VER1_OUTPUT)" MLFLOW_TRACKING_URI="sqlite:///$(DATA_VER1_DB)" \
-		MEDIAPIPE_FACE_MODEL="$(MEDIAPIPE_FACE_MODEL)" WEBEYETRACK_WEIGHTS="$(WEBEYETRACK_WEIGHTS)" \
-		KERAS_BACKEND=torch KERAS_TORCH_DEVICE=cpu \
+measured-prepare: measured-manifest
+	@GAZE_DATA_ROOT="$(MEASURED_DATA_ROOT)" MEASURED_DATA_MANIFEST="$(MEASURED_DATA_MANIFEST)" \
+		GAZE_OUTPUT_ROOT="$(MEASURED_OUTPUT)" MLFLOW_TRACKING_URI="sqlite:///$(MEASURED_DB)" \
 		"$(VENV_PYTHON)" -m gaze_pipeline prepare --config "$(CONFIG)" \
-		--profile "$(PROJECT_ROOT)/configs/profiles/blazegaze.yaml" \
-		--profile "$(PROJECT_ROOT)/configs/profiles/side_profile_90.yaml" \
-		--profile "$(DATA_VER1_PROFILE)"
+		--profile "$(FRONT_PREPROCESS_PROFILE)" \
+		--profile "$(SIDE_PREPROCESS_PROFILE)" \
+		--profile "$(SIDE_ROI_PROFILE)" \
+		--profile "$(MEASURED_DATA_PROFILE)" \
+		--profile "$(FRONT_MODEL_PROFILE)" \
+		--profile "$(SIDE_MODEL_PROFILE)"
 
-data-ver1-smoke: data-ver1-prepare
-	@GAZE_DATA_ROOT="$(DATA_VER1_ROOT)" DATA_VER1_MANIFEST="$(DATA_VER1_MANIFEST)" \
-		GAZE_OUTPUT_ROOT="$(DATA_VER1_OUTPUT)" MLFLOW_TRACKING_URI="sqlite:///$(DATA_VER1_DB)" \
-		MEDIAPIPE_FACE_MODEL="$(MEDIAPIPE_FACE_MODEL)" WEBEYETRACK_WEIGHTS="$(WEBEYETRACK_WEIGHTS)" \
-		KERAS_BACKEND=torch KERAS_TORCH_DEVICE=cpu MPLCONFIGDIR="$(DATA_VER1_SMOKE_ROOT)/matplotlib" \
-		"$(VENV_PYTHON)" -m gaze_pipeline train --config "$(CONFIG)" \
-		--profile "$(PROJECT_ROOT)/configs/profiles/blazegaze.yaml" \
-		--profile "$(PROJECT_ROOT)/configs/profiles/side_profile_90.yaml" \
-		--profile "$(DATA_VER1_PROFILE)"
-	@GAZE_DATA_ROOT="$(DATA_VER1_ROOT)" DATA_VER1_MANIFEST="$(DATA_VER1_MANIFEST)" \
-		GAZE_OUTPUT_ROOT="$(DATA_VER1_OUTPUT)" MLFLOW_TRACKING_URI="sqlite:///$(DATA_VER1_DB)" \
-		MEDIAPIPE_FACE_MODEL="$(MEDIAPIPE_FACE_MODEL)" WEBEYETRACK_WEIGHTS="$(WEBEYETRACK_WEIGHTS)" \
-		KERAS_BACKEND=torch KERAS_TORCH_DEVICE=cpu MPLCONFIGDIR="$(DATA_VER1_SMOKE_ROOT)/matplotlib" \
-		"$(VENV_PYTHON)" -m gaze_pipeline evaluate --config "$(CONFIG)" \
-		--profile "$(PROJECT_ROOT)/configs/profiles/blazegaze.yaml" \
-		--profile "$(PROJECT_ROOT)/configs/profiles/side_profile_90.yaml" \
-		--profile "$(DATA_VER1_PROFILE)" \
-		--checkpoint "$(DATA_VER1_OUTPUT)/data_ver1_smoke/data_ver1_smoke_run/checkpoints/best_weights.pt" \
-		--split validation
-	@MLFLOW_TRACKING_URI="sqlite:///$(DATA_VER1_DB)" "$(VENV_PYTHON)" \
-		"$(PROJECT_ROOT)/scripts/check_mlflow.py" --require-db
+measured-preview: require-venv check-webeyetrack-assets
+	@mkdir -p "$(MEASURED_RUN_ROOT)/matplotlib"
+	@KERAS_BACKEND=torch MPLCONFIGDIR="$(MEASURED_RUN_ROOT)/matplotlib" \
+		"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/preview_measured_inputs_preprocessing.py" \
+		--data-root "$(MEASURED_DATA_ROOT)" \
+		--output-dir "$(MEASURED_PREVIEW_OUTPUT)" \
+		--config "$(CONFIG)" \
+		--front-profile "$(FRONT_PREPROCESS_PROFILE)" \
+		--model-asset "$(MEDIAPIPE_FACE_MODEL)" \
+		--side-annotations "$(SIDE_ANNOTATIONS)" \
+		--samples 2 --sessions head_down neutral --overwrite
 
-demo-mlflow-check: require-venv
-	@MLFLOW_TRACKING_URI="sqlite:///$(DEMO_DB)" "$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/check_mlflow.py" --require-db
+measured-train: require-venv check-webeyetrack-assets
+	@if [[ ! -d "$(MEASURED_DATA_ROOT)" ]]; then echo "측정 DB 폴더가 없습니다: $(MEASURED_DATA_ROOT)"; exit 2; fi
+	@mkdir -p "$(MEASURED_RUN_ROOT)"
+	@"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/create_measured_data_manifest.py" \
+		--source-root "$(MEASURED_DATA_ROOT)" \
+		--output-manifest "$(MEASURED_DATA_MANIFEST)" \
+		--sessions head_down neutral --side-annotations "$(SIDE_ANNOTATIONS)" \
+		--require-front-pose --require-side-annotations --force
+	@GAZE_DATA_ROOT="$(MEASURED_DATA_ROOT)" MEASURED_DATA_MANIFEST="$(MEASURED_DATA_MANIFEST)" \
+		GAZE_OUTPUT_ROOT="$(MEASURED_OUTPUT)" MLFLOW_TRACKING_URI="sqlite:///$(MEASURED_DB)" \
+		MEDIAPIPE_FACE_MODEL="$(MEDIAPIPE_FACE_MODEL)" \
+		WEBEYETRACK_WEIGHTS="$(WEBEYETRACK_WEIGHTS)" KERAS_BACKEND=torch \
+		KERAS_TORCH_DEVICE=cpu "$(VENV_PYTHON)" -m gaze_pipeline train --config "$(CONFIG)" \
+		--profile "$(FRONT_PREPROCESS_PROFILE)" \
+		--profile "$(SIDE_PREPROCESS_PROFILE)" \
+		--profile "$(SIDE_ROI_PROFILE)" \
+		--profile "$(MEASURED_DATA_PROFILE)" \
+		--profile "$(FRONT_MODEL_PROFILE)" \
+		--profile "$(SIDE_MODEL_PROFILE)" $(OVERRIDES)
 
-demo-mlflow-ui: require-venv
-	@echo "Demo MLflow UI: http://127.0.0.1:$(MLFLOW_PORT)"
-	@"$(VENV_MLFLOW)" ui --backend-store-uri "sqlite:///$(DEMO_DB)" --port "$(MLFLOW_PORT)"
+measured-evaluate: require-venv check-webeyetrack-assets
+	@if [[ ! -f "$(MEASURED_DATA_MANIFEST)" ]]; then echo "먼저 make measured-manifest를 실행하세요: $(MEASURED_DATA_MANIFEST)"; exit 2; fi
+	@if [[ -z "$(strip $(CHECKPOINT))" ]]; then echo "CHECKPOINT 절대경로가 필요합니다."; exit 2; fi
+	@if [[ ! -f "$(CHECKPOINT)" ]]; then echo "checkpoint가 없습니다: $(CHECKPOINT)"; exit 2; fi
+	@GAZE_DATA_ROOT="$(MEASURED_DATA_ROOT)" MEASURED_DATA_MANIFEST="$(MEASURED_DATA_MANIFEST)" \
+		GAZE_OUTPUT_ROOT="$(MEASURED_OUTPUT)" MLFLOW_TRACKING_URI="sqlite:///$(MEASURED_DB)" \
+		MEDIAPIPE_FACE_MODEL="$(MEDIAPIPE_FACE_MODEL)" \
+		WEBEYETRACK_WEIGHTS="$(WEBEYETRACK_WEIGHTS)" KERAS_BACKEND=torch \
+		KERAS_TORCH_DEVICE=cpu "$(VENV_PYTHON)" -m gaze_pipeline evaluate --config "$(CONFIG)" \
+		--profile "$(FRONT_PREPROCESS_PROFILE)" \
+		--profile "$(SIDE_PREPROCESS_PROFILE)" \
+		--profile "$(SIDE_ROI_PROFILE)" \
+		--profile "$(MEASURED_DATA_PROFILE)" \
+		--profile "$(FRONT_MODEL_PROFILE)" \
+		--profile "$(SIDE_MODEL_PROFILE)" \
+		--checkpoint "$(CHECKPOINT)" --split "$(EVAL_SPLIT)" $(OVERRIDES)
+
+measured-mlflow-ui: require-venv
+	@echo "Measured-data MLflow UI: http://127.0.0.1:$(MLFLOW_PORT)"
+	@"$(VENV_MLFLOW)" ui --backend-store-uri "sqlite:///$(MEASURED_DB)" --port "$(MLFLOW_PORT)"
 
 webeyetrack-assets: require-venv
 	@"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/fetch_webeyetrack_assets.py" --output-dir "$(WEBEYETRACK_ASSET_DIR)"
 
 check-webeyetrack-assets: require-venv
 	@"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/fetch_webeyetrack_assets.py" --output-dir "$(WEBEYETRACK_ASSET_DIR)" --check-only
-
-preprocess-preview: require-venv
-	@if [[ ! -f "$(MEDIAPIPE_FACE_MODEL)" ]]; then echo "MediaPipe model이 없습니다: $(MEDIAPIPE_FACE_MODEL)"; echo "먼저 make webeyetrack-assets를 실행하세요."; exit 2; fi
-	@MEDIAPIPE_FACE_MODEL="$(MEDIAPIPE_FACE_MODEL)" WEBEYETRACK_WEIGHTS="$(WEBEYETRACK_WEIGHTS)" "$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/plot_webeyetrack_preprocessing.py" --input-root "$(EXAMPLE_ROOT)" --output-dir "$(PREVIEW_OUTPUT)" --config "$(CONFIG)" --model-asset "$(MEDIAPIPE_FACE_MODEL)" $(PREVIEW_ONLY_ARG)
-
-preprocess-profile90-preview: require-venv
-	@if [[ ! -f "$(MEDIAPIPE_FACE_MODEL)" ]]; then echo "MediaPipe model이 없습니다: $(MEDIAPIPE_FACE_MODEL)"; echo "front 전처리를 위해 먼저 make webeyetrack-assets를 실행하세요."; exit 2; fi
-	@if [[ ! -f "$(PROFILE90_ANNOTATIONS)" ]]; then echo "strict-profile annotation이 없습니다: $(PROFILE90_ANNOTATIONS)"; exit 2; fi
-	@MEDIAPIPE_FACE_MODEL="$(MEDIAPIPE_FACE_MODEL)" WEBEYETRACK_WEIGHTS="$(WEBEYETRACK_WEIGHTS)" "$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/plot_front_and_profile90_preprocessing.py" --input-root "$(EXAMPLE_ROOT)" --output-dir "$(PROFILE90_PREVIEW_OUTPUT)" --config "$(CONFIG)" --front-profile "$(PROFILE90_FRONT_PROFILE)" --annotations "$(PROFILE90_ANNOTATIONS)" --model-asset "$(MEDIAPIPE_FACE_MODEL)"
-
-preprocess-profile90-pose-grid: require-venv
-	@if [[ ! -f "$(PROFILE90_POSE_GRID_ANNOTATIONS)" ]]; then echo "3x3 pose annotation이 없습니다: $(PROFILE90_POSE_GRID_ANNOTATIONS)"; exit 2; fi
-	@"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/plot_profile90_pose_grid.py" --input-root "$(EXAMPLE_ROOT)" --annotations "$(PROFILE90_POSE_GRID_ANNOTATIONS)" --output-dir "$(PROFILE90_POSE_GRID_OUTPUT)"
 
 test: require-venv
 	@"$(VENV_PYTHON)" -m pytest -q

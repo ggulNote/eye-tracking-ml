@@ -54,6 +54,9 @@ _GENERIC_OPTIONAL_METADATA_COLUMNS = frozenset(
     {
         "session_id",
         "facial_landmarks_xy",
+        "head_vector",
+        "face_origin_3d",
+        "head_pose_valid",
         "head_rotation_3d",
         "head_translation_3d",
         "face_center_3d",
@@ -121,6 +124,7 @@ def prepare_data(
     data_config = _required_mapping(config, "data")
     reader_config = _required_mapping(data_config, "reader")
     pairing_config = _mapping(data_config.get("pairing"), "data.pairing")
+    selection_config = _mapping(data_config.get("selection"), "data.selection")
     split_config = _required_mapping(data_config, "split")
     _validate_supported_prepare_options(reader_config, split_config)
     reader_type = str(reader_config.get("type", "")).strip().lower()
@@ -160,8 +164,12 @@ def prepare_data(
             f"unsupported data.reader.type {reader_type!r}; choose one of {sorted(supported)}"
         )
 
-    pair_validation = validate_explicit_pairs(
+    selected_records, selection_summary = _select_records(
         source_records,
+        selection_config=selection_config,
+    )
+    pair_validation = validate_explicit_pairs(
+        selected_records,
         enabled=bool(pairing_config.get("enabled", False)),
         require_same_subject=bool(pairing_config.get("require_same_subject", True)),
         require_same_target=bool(pairing_config.get("require_same_target", True)),
@@ -203,6 +211,7 @@ def prepare_data(
         records=records,
         resolved_config=config,
         source_record_count=len(source_records),
+        selection_summary=selection_summary,
         splits=splits,
         pair_validation=pair_validation,
         manifest_dir=manifest_dir,
@@ -310,6 +319,56 @@ def read_generic_csv_manifest(
     return sorted(records, key=_record_sort_key)
 
 
+def _select_records(
+    records: Sequence[CanonicalRecord],
+    *,
+    selection_config: Mapping[str, Any],
+) -> tuple[list[CanonicalRecord], dict[str, Any]]:
+    """Apply an exact canonical-session allow-list before pairing/splitting."""
+
+    raw_session_ids = selection_config.get("session_ids")
+    if raw_session_ids is None:
+        return list(records), {
+            "enabled": False,
+            "session_ids": [],
+            "selected_records": len(records),
+            "dropped_records": 0,
+        }
+    if not isinstance(raw_session_ids, list) or not raw_session_ids:
+        raise DataPreparationError(
+            "data.selection.session_ids must be null or a non-empty list of session strings"
+        )
+
+    session_ids: list[str] = []
+    for raw_value in raw_session_ids:
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            raise DataPreparationError(
+                "data.selection.session_ids values must be non-empty strings"
+            )
+        session_ids.append(raw_value.strip())
+    if len(session_ids) != len(set(session_ids)):
+        raise DataPreparationError("data.selection.session_ids contains duplicate values")
+
+    available_session_ids = {record.session_id for record in records}
+    missing = sorted(set(session_ids) - available_session_ids)
+    if missing:
+        raise DataPreparationError(
+            "data.selection.session_ids contains sessions absent from the manifest: "
+            f"{missing}; available={sorted(available_session_ids)}"
+        )
+
+    allowed = set(session_ids)
+    selected = [record for record in records if record.session_id in allowed]
+    if not selected:
+        raise DataPreparationError("data.selection removed every source record")
+    return selected, {
+        "enabled": True,
+        "session_ids": session_ids,
+        "selected_records": len(selected),
+        "dropped_records": len(records) - len(selected),
+    }
+
+
 def _generic_row_to_record(
     row: Mapping[str, str],
     *,
@@ -370,6 +429,13 @@ def _generic_row_to_record(
         ),
         screen=screen,
         facial_landmarks_xy=_optional_json_landmarks(row, "facial_landmarks_xy"),
+        head_vector=_optional_json_vector(row, "head_vector"),
+        face_origin_3d=_optional_json_vector(row, "face_origin_3d"),
+        head_pose_valid=_optional_boolean_cell(
+            row,
+            "head_pose_valid",
+            default=False,
+        ),
         head_rotation_3d=_optional_json_vector(row, "head_rotation_3d"),
         head_translation_3d=_optional_json_vector(row, "head_translation_3d"),
         face_center_3d=_optional_json_vector(row, "face_center_3d"),
@@ -410,6 +476,7 @@ def _write_preparation_artifacts(
     records: Sequence[CanonicalRecord],
     resolved_config: Mapping[str, Any],
     source_record_count: int,
+    selection_summary: Mapping[str, Any],
     splits: Mapping[str, Sequence[CanonicalRecord]],
     pair_validation: PairValidationResult,
     manifest_dir: Path,
@@ -471,6 +538,7 @@ def _write_preparation_artifacts(
     summary = _build_summary(
         records=records,
         source_record_count=source_record_count,
+        selection_summary=selection_summary,
         splits=splits,
         pair_validation=pair_validation,
         dataset_root=dataset_root,
@@ -547,6 +615,7 @@ def _build_summary(
     *,
     records: Sequence[CanonicalRecord],
     source_record_count: int,
+    selection_summary: Mapping[str, Any],
     splits: Mapping[str, Sequence[CanonicalRecord]],
     pair_validation: PairValidationResult,
     dataset_root: Path,
@@ -564,6 +633,8 @@ def _build_summary(
     artifact_hashes: Mapping[str, str],
 ) -> dict[str, Any]:
     total = len(records)
+    all_groups = {str(getattr(record, group_key)) for record in records}
+    total_groups = len(all_groups)
     split_summary: dict[str, Any] = {}
     for split_name in SPLIT_NAMES:
         split_records = splits[split_name]
@@ -572,6 +643,7 @@ def _build_summary(
             "records": len(split_records),
             "groups": len(groups),
             "group_ids": groups,
+            "realized_group_ratio": len(groups) / total_groups,
             "realized_record_ratio": len(split_records) / total,
         }
 
@@ -598,6 +670,7 @@ def _build_summary(
                 "metric_filter": "target_in_screen_bounds == true",
             },
         },
+        "selection": dict(selection_summary),
         "pairing": {
             "enabled": pairing_enabled,
             "strategy": "explicit_pair_id",
@@ -610,6 +683,7 @@ def _build_summary(
         "split": {
             "strategy": "grouped_ratio",
             "group_key": group_key,
+            "total_groups": total_groups,
             "seed": seed,
             "configured_ratios": {name: float(ratios[name]) for name in SPLIT_NAMES},
             "partitions": split_summary,

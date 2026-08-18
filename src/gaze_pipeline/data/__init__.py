@@ -23,6 +23,12 @@ from .pipeline import (
     prepare_data,
     read_generic_csv_manifest,
 )
+from .preprocessing_cache import (
+    PreprocessingCacheCorruptionError,
+    PreprocessingCacheError,
+    PreprocessingCacheSecurityError,
+    TrustedLocalPreprocessingCache,
+)
 from .records import (
     MANIFEST_COLUMNS,
     CanonicalRecord,
@@ -73,6 +79,9 @@ __all__ = [
     "OpenCVHaarFaceDetector",
     "PairValidationError",
     "PairValidationResult",
+    "PreprocessingCacheCorruptionError",
+    "PreprocessingCacheError",
+    "PreprocessingCacheSecurityError",
     "SampleDroppedError",
     "SampleValidationError",
     "ScreenCalibration",
@@ -80,6 +89,7 @@ __all__ = [
     "StaticGazeDataset",
     "TransformConfigError",
     "TransformDependencyError",
+    "TrustedLocalPreprocessingCache",
     "build_dataloader",
     "deterministic_group_split",
     "ensure_unique_records",

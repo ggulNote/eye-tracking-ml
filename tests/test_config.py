@@ -15,6 +15,9 @@ from gaze_pipeline.config import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BASE_CONFIG = PROJECT_ROOT / "configs" / "config.yaml"
 PROFILE90_CONFIG = PROJECT_ROOT / "configs" / "profiles" / "side_profile_90.yaml"
+MEASURED_PROFILE = PROJECT_ROOT / "configs" / "profiles" / "measured_head_down_neutral.yaml"
+SIDE_ROI_PROFILE = PROJECT_ROOT / "configs" / "profiles" / "side_roi_only.yaml"
+FRONT_MODEL_PROFILE = PROJECT_ROOT / "configs" / "models" / "front_webeyetrack.yaml"
 
 
 @pytest.mark.parametrize(
@@ -23,10 +26,8 @@ PROFILE90_CONFIG = PROJECT_ROOT / "configs" / "profiles" / "side_profile_90.yaml
         (),
         ("blazegaze.yaml",),
         ("demo_dual_view_training.yaml",),
-        ("demo_two_images.yaml",),
-        ("side_full_face.yaml",),
-        ("side_one_eye.yaml",),
         ("blazegaze.yaml", "side_profile_90.yaml"),
+        ("blazegaze.yaml", "side_profile_90.yaml", "side_roi_only.yaml"),
     ],
 )
 def test_execution_config_validation_accepts_shipped_profiles(
@@ -38,6 +39,76 @@ def test_execution_config_validation_accepts_shipped_profiles(
         BASE_CONFIG,
         profiles=tuple(profile_dir / name for name in profile_names),
     )
+
+
+@pytest.mark.parametrize(
+    ("side_model_name", "entrypoint", "expected_init_args"),
+    [
+        (
+            "side_mobilenet_v4.yaml",
+            "gaze_pipeline.models.side.mobilenet_v4:create_model",
+            {
+                "model_id",
+                "pretrained",
+                "embedding_dim",
+                "auxiliary_dim",
+                "normalize_imagenet",
+                "image_mean",
+                "image_std",
+                "dropout",
+            },
+        ),
+        (
+            "side_blazegaze_transfer.yaml",
+            "gaze_pipeline.models.side.blazegaze_transfer:create_model",
+            {
+                "encoder_weights_path",
+                "image_feature_dim",
+                "embedding_dim",
+                "auxiliary_dim",
+                "dropout",
+            },
+        ),
+    ],
+)
+def test_measured_dataset_profile_composes_with_exactly_one_side_model(
+    side_model_name: str,
+    entrypoint: str,
+    expected_init_args: set[str],
+) -> None:
+    config = load_and_validate_config(
+        BASE_CONFIG,
+        profiles=(
+            PROJECT_ROOT / "configs" / "profiles" / "blazegaze.yaml",
+            PROFILE90_CONFIG,
+            SIDE_ROI_PROFILE,
+            MEASURED_PROFILE,
+            FRONT_MODEL_PROFILE,
+            PROJECT_ROOT / "configs" / "models" / side_model_name,
+        ),
+    )
+
+    front = config["model"]["front"]
+    side = config["model"]["side"]
+    assert front["entrypoint"] == "gaze_pipeline.models.webeyetrack_front:create_model"
+    assert set(front["init_args"]) == {
+        "weights_path",
+        "expected_sha256",
+        "unfreeze_encoder",
+    }
+    assert side["entrypoint"] == entrypoint
+    assert set(side["init_args"]) == expected_init_args
+    assert "image_key" not in side["init_args"]
+    assert "feature_keys" not in side["init_args"]
+    assert config["data"]["selection"]["session_ids"] == ["head_down", "neutral"]
+    measured_front = config["preprocessing"]["branch_overrides"]["front"]
+    assert measured_front["metric_head_pose"]["source"] == "precomputed_only"
+    assert measured_front["metric_head_pose"]["on_failure"] == "error"
+    side_warp = config["preprocessing"]["branch_overrides"]["side"]["eye_region_warp"]
+    assert side_warp["crop_mode"] == "stretch"
+    assert side_warp["bbox_scale_xy"] == [1.0, 1.0]
+    assert resolve_model_forward_keys(config, "side") == ("side_image",)
+    assert config["preprocessing"]["cache"]["enabled"] is True
 
 
 def test_base_config_resolves_environment_references_and_overrides(tmp_path: Path) -> None:
@@ -212,6 +283,27 @@ def test_invalid_split_ratio_is_reported() -> None:
         )
 
 
+def test_session_selection_can_be_set_from_cli_override() -> None:
+    config = load_and_validate_config(
+        BASE_CONFIG,
+        overrides=("data.selection.session_ids=[head_down,neutral]",),
+    )
+
+    assert config["data"]["selection"]["session_ids"] == ["head_down", "neutral"]
+
+
+@pytest.mark.parametrize(
+    "session_ids",
+    ([], ["neutral", "neutral"], ["neutral", ""]),
+)
+def test_invalid_session_selection_is_reported(session_ids: list[str]) -> None:
+    config = load_and_validate_config(BASE_CONFIG)
+    config["data"]["selection"]["session_ids"] = session_ids
+
+    with pytest.raises(ConfigValidationError, match=r"data\.selection\.session_ids"):
+        validate_config(config)
+
+
 def test_zero_validation_and_test_ratios_are_allowed_for_smoke_demo() -> None:
     config = load_and_validate_config(
         BASE_CONFIG,
@@ -329,6 +421,8 @@ def test_profile90_annotation_crop_does_not_require_frontal_landmarks() -> None:
     )
 
     side = config["preprocessing"]["branch_overrides"]["side"]
+    front = config["preprocessing"]["branch_overrides"]["front"]
+    assert front["metric_head_pose"]["source"] == "precomputed_or_reconstruct"
     assert side["face_landmarks"]["enabled"] is False
     assert side["eye_region_warp"]["method"] == "profile90_annotation"
     assert side["eye_region_warp"]["eyelid_tail_indices"] == [3, 2, 4]
@@ -352,8 +446,6 @@ def test_profile90_annotation_crop_does_not_require_frontal_landmarks() -> None:
     assert contract["validity_key"] == "side_gaze_valid"
     assert contract["validity_role"] == "loss_metric_fusion_mask"
     assert contract["validity_passed_to_model"] is False
-    assert contract["diagnostics"]["ear"]["key"] == "side_ear"
-    assert contract["diagnostics"]["ear"]["passed_to_model"] is False
 
 
 def test_profile90_feature_toggles_resolve_forward_keys_automatically() -> None:
@@ -498,8 +590,7 @@ def test_profile90_eye_roi_cannot_be_disabled_by_feature_ablation() -> None:
 @pytest.mark.parametrize(
     ("key", "value", "message"),
     [
-        ("crop_mode", "stretch", "crop_mode"),
-        ("ear_threshold", 0.0, "ear_threshold"),
+        ("crop_mode", "unknown", "crop_mode"),
         ("landmark_crop_scale_xy", [2.4, 0.0], "landmark_crop_scale_xy"),
         ("eyelid_tail_indices", [3, 1, 4], "eyelid_tail_indices"),
     ],
@@ -550,6 +641,21 @@ def test_blazegaze_face_crop_size_must_be_positive() -> None:
     config["preprocessing"]["branch_overrides"]["front"]["eye_region_warp"]["face_crop_size"] = 0
 
     with pytest.raises(ConfigValidationError, match="face_crop_size"):
+        validate_config(config)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    (("source", "unknown"), ("precomputed_face_origin_unit", "meter")),
+)
+def test_blazegaze_precomputed_pose_options_are_validated(key: str, value: object) -> None:
+    config = load_and_validate_config(
+        BASE_CONFIG,
+        profiles=(PROJECT_ROOT / "configs" / "profiles" / "blazegaze.yaml",),
+    )
+    config["preprocessing"]["branch_overrides"]["front"]["metric_head_pose"][key] = value
+
+    with pytest.raises(ConfigValidationError, match=key):
         validate_config(config)
 
 

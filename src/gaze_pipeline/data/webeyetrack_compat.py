@@ -16,8 +16,8 @@ from typing import Any
 
 import numpy as np
 
-LEFT_EAR_INDICES = (362, 385, 387, 263, 373, 380)
-RIGHT_EAR_INDICES = (133, 158, 160, 33, 144, 153)
+LEFT_EYELID_INDICES = (362, 385, 387, 263, 373, 380)
+RIGHT_EYELID_INDICES = (133, 158, 160, 33, 144, 153)
 LEFT_EYE_HORIZONTAL_INDICES = (362, 263)
 RIGHT_EYE_HORIZONTAL_INDICES = (33, 133)
 LEFT_IRIS_INDICES = (473, 475, 474, 477, 476)
@@ -41,35 +41,6 @@ def _require_landmark_count(landmarks: np.ndarray, maximum_index: int, *, name: 
         raise WebEyeTrackGeometryError(
             f"{name} requires landmark index {maximum_index}, but only {len(landmarks)} exist"
         )
-
-
-def compute_ear(
-    landmarks_xy: np.ndarray,
-    eye: str,
-    *,
-    indices: Sequence[int] | None = None,
-) -> float:
-    """Compute the six-point eye-aspect ratio used by WebEyeTrack."""
-
-    points = np.asarray(landmarks_xy, dtype=np.float64)
-    resolved_indices = (
-        tuple(int(index) for index in indices)
-        if indices is not None
-        else LEFT_EAR_INDICES
-        if str(eye).lower() == "left"
-        else RIGHT_EAR_INDICES
-    )
-    if len(resolved_indices) != 6:
-        raise WebEyeTrackGeometryError("EAR requires exactly six landmark indices")
-    _require_landmark_count(points, max(resolved_indices), name="EAR landmarks")
-    p1, p2, p3, p4, p5, p6 = points[np.asarray(resolved_indices, dtype=int), :2]
-    denominator = 2.0 * float(np.linalg.norm(p1 - p4))
-    if denominator <= 1e-8:
-        raise WebEyeTrackGeometryError(f"{eye} EAR horizontal eyelid distance is zero")
-    value = (float(np.linalg.norm(p2 - p6)) + float(np.linalg.norm(p3 - p5))) / denominator
-    if not np.isfinite(value):
-        raise WebEyeTrackGeometryError(f"{eye} EAR is non-finite")
-    return value
 
 
 def visible_eye_scores(
@@ -233,11 +204,11 @@ def single_eye_patch(
     if normalized_eye not in {"left", "right"}:
         raise WebEyeTrackGeometryError("single-eye patch requires eye='left' or 'right'")
     points = np.asarray(landmarks_xy, dtype=np.float32)
-    ear_indices = LEFT_EAR_INDICES if normalized_eye == "left" else RIGHT_EAR_INDICES
+    eyelid_indices = LEFT_EYELID_INDICES if normalized_eye == "left" else RIGHT_EYELID_INDICES
     horizontal = (
         LEFT_EYE_HORIZONTAL_INDICES if normalized_eye == "left" else RIGHT_EYE_HORIZONTAL_INDICES
     )
-    _require_landmark_count(points, max(*ear_indices, *horizontal), name="single-eye landmarks")
+    _require_landmark_count(points, max(*eyelid_indices, *horizontal), name="single-eye landmarks")
     p0, p1 = points[np.asarray(horizontal, dtype=int), :2]
     center = (p0 + p1) / 2.0
     axis_x = p1 - p0
@@ -247,7 +218,7 @@ def single_eye_patch(
     axis_x /= width
     axis_y = np.asarray([-axis_x[1], axis_x[0]], dtype=np.float32)
 
-    eyelid = points[np.asarray(ear_indices, dtype=int), :2]
+    eyelid = points[np.asarray(eyelid_indices, dtype=int), :2]
     vertical_extent = float(np.ptp((eyelid - center) @ axis_y))
     half_width = width * (0.5 + float(horizontal_margin_ratio))
     half_height = max(width * 0.20, vertical_extent * (0.5 + float(vertical_margin_ratio)))

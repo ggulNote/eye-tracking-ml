@@ -4,9 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from gaze_pipeline.data.transforms import OrderedGazePreprocessor
 from gaze_pipeline.data.webeyetrack_compat import (
-    compute_ear,
     head_vector_from_face_rt,
     select_eye,
     webeyetrack_eye_patch,
@@ -62,11 +60,9 @@ def test_eye_patch_matches_official_obtain_eyepatch_pixels() -> None:
     assert debug["source_quad_xy"].shape == (4, 2)
 
 
-def test_ear_and_visible_eye_selection() -> None:
+def test_visible_eye_selection() -> None:
     points = _landmarks()
 
-    assert compute_ear(points, "left") == pytest.approx(0.5)
-    assert compute_ear(points, "right") == pytest.approx(0.375)
     selected, scores = select_eye(points, mode="best_visible")
 
     assert selected == "left"
@@ -79,38 +75,3 @@ def test_identity_face_transform_points_forward() -> None:
 
     assert vector.tolist() == pytest.approx([0.0, 0.0, -1.0])
     assert mapped_euler.tolist() == pytest.approx([0.0, 0.0, 0.0])
-
-
-def test_closed_selected_eye_marks_side_gaze_invalid() -> None:
-    points = _landmarks()
-    # Collapse the right-eye vertical distances below the 0.20 threshold.
-    points[[158, 160, 144, 153], 1] = 40.0
-    config = {
-        "stage_order": ["decode", "face_landmarks", "eye_selection", "eye_state"],
-        "decode": {"enabled": True},
-        "face_landmarks": {"enabled": True, "source": "annotation"},
-        "eye_selection": {
-            "enabled": True,
-            "mode": "fixed",
-            "target_eye": "right",
-        },
-        "eye_state": {
-            "enabled": True,
-            "threshold": 0.20,
-            "required_eye_policy": "selected_eye_open",
-            "on_closed": "mark_invalid",
-        },
-    }
-    sample = {
-        "image": np.zeros((90, 140, 3), dtype=np.uint8),
-        "view": "side",
-        "facial_landmarks_xy": points,
-        "metadata": {},
-    }
-
-    output = OrderedGazePreprocessor(config, split="validation")(sample)
-
-    assert output["metadata"]["selected_eye"] == "right"
-    assert output["metadata"]["eye_open_mask"].tolist() == [True, False]
-    assert output["metadata"]["gaze_valid"] is False
-    assert "eye_state:required_eye_closed" in output["metadata"]["invalid_reasons"]

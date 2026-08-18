@@ -5,7 +5,7 @@ It consumes image-space annotations produced by a profile-capable detector (or
 by a human annotator) and turns them into a deterministic monocular model
 input plus independently selectable geometric features.
 
-The six eyelid points use the conventional EAR order::
+The six eyelid points use this fixed contour order::
 
     [corner_a, upper_a, upper_b, corner_b, lower_b, lower_a]
 
@@ -41,7 +41,6 @@ class ProfileSidePreprocessResult:
             coordinates.
         eye_pose_2d: Optional iris displacement in an eye-aligned coordinate
             frame, divided by the visible eye width and opening height.
-        ear: Selected-eye EAR, or ``None`` when only an eye bbox is supplied.
         source_quad_xy: Source crop corners in TL, TR, BR, BL order.
         eyelid_center_xy: Eye anchor used for the eye displacement.
         iris_center_xy: Validated iris center in source-image coordinates.
@@ -61,7 +60,7 @@ class ProfileSidePreprocessResult:
         eyelid_tail_angle_normalized: The same scalar divided by 180 degrees,
             with range ``[0,1]``. This legacy included-angle scalar is retained
             for annotation diagnostics only; v3 does not forward it to a model.
-        head_pitch_proxy_degrees: Projected ear-anchor-to-nose elevation angle;
+        head_pitch_proxy_degrees: Projected profile-head-anchor-to-nose elevation angle;
             positive is image-up. This is not calibrated 3D head pose.
     """
 
@@ -69,7 +68,6 @@ class ProfileSidePreprocessResult:
     source_to_patch: np.ndarray
     head_pose_2d: np.ndarray | None
     eye_pose_2d: np.ndarray | None
-    ear: float | None
     source_quad_xy: np.ndarray
     eyelid_center_xy: np.ndarray
     iris_center_xy: np.ndarray | None
@@ -244,32 +242,6 @@ def _validate_eyelid_points(
     return points
 
 
-def selected_eye_ear(eyelid_keypoints_xy: Sequence[Sequence[float]] | np.ndarray) -> float:
-    """Compute EAR from exactly one annotated eye.
-
-    The point order is ``corner_a, upper_a, upper_b, corner_b, lower_b,
-    lower_a``. This function intentionally has no left/right-face landmark
-    lookup because a strict profile image contains only the selected eye.
-    """
-
-    points = np.asarray(eyelid_keypoints_xy, dtype=np.float64)
-    if points.shape != (6, 2):
-        raise ProfileSideGeometryError(
-            f"eyelid_keypoints_xy must have shape [6,2], got {points.shape}"
-        )
-    if not np.isfinite(points).all():
-        raise ProfileSideGeometryError("eyelid_keypoints_xy contains a non-finite coordinate")
-    eye_width = float(np.linalg.norm(points[3] - points[0]))
-    if eye_width <= 1e-8:
-        raise ProfileSideGeometryError("selected eye has zero corner-to-corner width")
-    vertical_a = float(np.linalg.norm(points[1] - points[5]))
-    vertical_b = float(np.linalg.norm(points[2] - points[4]))
-    ear = (vertical_a + vertical_b) / (2.0 * eye_width)
-    if not np.isfinite(ear):
-        raise ProfileSideGeometryError("selected-eye EAR is non-finite")
-    return ear
-
-
 def _eye_geometry_from_keypoints(
     points: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
@@ -380,7 +352,7 @@ def preprocess_profile_side(
     head_origin_xy: Sequence[float] | np.ndarray | None = None,
     head_forward_point_xy: Sequence[float] | np.ndarray | None = None,
     output_size_hw: Sequence[int] = (128, 256),
-    crop_mode: Literal["affine", "letterbox"] = "affine",
+    crop_mode: Literal["affine", "letterbox", "stretch"] = "affine",
     vertical_only: bool = False,
     landmark_crop_scale_xy: Sequence[float] = (2.4, 1.2),
     bbox_crop_scale_xy: Sequence[float] = (1.0, 1.0),
@@ -400,8 +372,13 @@ def preprocess_profile_side(
     remaining output with ``border_value_rgb``. Without an explicit bbox it
     letterboxes the axis-aligned bounds of the six eyelid points.
 
-    When both annotations are supplied, eyelid points always define EAR and
-    eye-pose geometry. The bbox controls a letterbox crop; eyelid geometry
+    ``stretch`` clips each sample's bbox to its source image, crops only that
+    eye region, and directly resizes it to the requested output. It never adds
+    letterbox padding, so variable person-specific bboxes still produce the
+    same model tensor shape.
+
+    When both annotations are supplied, eyelid points define eye-pose
+    geometry. The bbox controls a letterbox/stretch crop; eyelid geometry
     controls an affine crop.
     """
 
@@ -424,8 +401,8 @@ def preprocess_profile_side(
         raise ProfileSideGeometryError("output height and width must each be at least 2")
 
     normalized_crop_mode = str(crop_mode).lower()
-    if normalized_crop_mode not in {"affine", "letterbox"}:
-        raise ProfileSideGeometryError("crop_mode must be 'affine' or 'letterbox'")
+    if normalized_crop_mode not in {"affine", "letterbox", "stretch"}:
+        raise ProfileSideGeometryError("crop_mode must be 'affine', 'letterbox', or 'stretch'")
     landmark_scale = _as_positive_pair(landmark_crop_scale_xy, name="landmark_crop_scale_xy")
     bbox_scale = _as_positive_pair(bbox_crop_scale_xy, name="bbox_crop_scale_xy")
     border = np.asarray(border_value_rgb, dtype=np.float64)
@@ -491,7 +468,6 @@ def preprocess_profile_side(
         eye_center, axis_x, axis_y, eye_width, eye_height = _eye_geometry_from_keypoints(
             eyelid_points
         )
-        ear: float | None = selected_eye_ear(eyelid_points)
         if extract_eye_angles:
             tail_indices = _validate_tail_indices(eyelid_tail_indices)
             (
@@ -520,7 +496,6 @@ def preprocess_profile_side(
         axis_y = np.asarray([0.0, 1.0])
         eye_width = float(x1 - x0)
         eye_height = float(y1 - y0)
-        ear = None
         eyelid_tail_points = None
         eyelid_tail_vectors_px = None
         eyelid_direction_angles_degrees = None
@@ -576,11 +551,30 @@ def preprocess_profile_side(
     ):
         raise ProfileSideGeometryError("source crop quad does not intersect the image")
 
+    if normalized_crop_mode == "stretch":
+        crop_x0 = max(0, int(np.floor(float(source_quad[:, 0].min()))))
+        crop_y0 = max(0, int(np.floor(float(source_quad[:, 1].min()))))
+        crop_x1 = min(image_width, int(np.ceil(float(source_quad[:, 0].max()))))
+        crop_y1 = min(image_height, int(np.ceil(float(source_quad[:, 1].max()))))
+        if crop_x1 - crop_x0 < 2 or crop_y1 - crop_y0 < 2:
+            raise ProfileSideGeometryError(
+                "clipped stretch crop must be at least 2x2 source pixels"
+            )
+        source_quad = np.asarray(
+            [
+                [crop_x0, crop_y0],
+                [crop_x1 - 1, crop_y0],
+                [crop_x1 - 1, crop_y1 - 1],
+                [crop_x0, crop_y1 - 1],
+            ],
+            dtype=np.float64,
+        )
+
     destination_quad = _destination_quad(
         source_quad,
         output_height=output_height,
         output_width=output_width,
-        crop_mode=normalized_crop_mode,
+        crop_mode="affine" if normalized_crop_mode == "stretch" else normalized_crop_mode,
     )
     source_to_patch = cv2.getPerspectiveTransform(
         source_quad.astype(np.float32), destination_quad.astype(np.float32)
@@ -589,14 +583,24 @@ def preprocess_profile_side(
         raise ProfileSideGeometryError("source-to-patch transform is non-finite")
     if abs(float(np.linalg.det(source_to_patch))) <= 1e-12:
         raise ProfileSideGeometryError("source-to-patch transform is singular")
-    patch = cv2.warpPerspective(
-        frame,
-        source_to_patch,
-        (output_width, output_height),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=tuple(float(value) for value in border),
-    )
+    if normalized_crop_mode == "stretch":
+        crop_x0, crop_y0 = np.rint(source_quad[0]).astype(int)
+        crop_x1, crop_y1 = np.rint(source_quad[2]).astype(int) + 1
+        source_crop = frame[crop_y0:crop_y1, crop_x0:crop_x1]
+        patch = cv2.resize(
+            source_crop,
+            (output_width, output_height),
+            interpolation=cv2.INTER_LINEAR,
+        )
+    else:
+        patch = cv2.warpPerspective(
+            frame,
+            source_to_patch,
+            (output_width, output_height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=tuple(float(value) for value in border),
+        )
     if normalized_crop_mode == "letterbox":
         # A homography is defined outside the four correspondences too, so a
         # direct full-frame warp would leak neighboring source pixels into the
@@ -618,7 +622,6 @@ def preprocess_profile_side(
         source_to_patch=source_to_patch.astype(np.float32),
         head_pose_2d=head_pose.astype(np.float32) if head_pose is not None else None,
         eye_pose_2d=eye_pose.astype(np.float32) if eye_pose is not None else None,
-        ear=ear,
         source_quad_xy=source_quad.astype(np.float32),
         eyelid_center_xy=eye_center.astype(np.float32),
         iris_center_xy=iris_center.astype(np.float32) if iris_center is not None else None,
@@ -651,5 +654,4 @@ __all__ = [
     "ProfileSideGeometryError",
     "ProfileSidePreprocessResult",
     "preprocess_profile_side",
-    "selected_eye_ear",
 ]

@@ -93,7 +93,7 @@ def _front3d_side_config(*, invalid_policy: str = "zero_fill_and_mask") -> dict[
 class _AuxiliaryPreprocessor:
     """Small deterministic stand-in for the landmark-dependent stages."""
 
-    stage_order = ("eye_selection", "eye_state", "metric_head_pose")
+    stage_order = ("eye_selection", "metric_head_pose")
 
     @staticmethod
     def _stage_config(_stage: str, _view: str) -> Mapping[str, Any]:
@@ -136,15 +136,6 @@ class _AuxiliaryPreprocessor:
                 "face_origin_valid": view == "front",
                 "head_pose_valid": view == "front",
                 "gaze_valid": view == "front",
-                "ear": np.asarray(
-                    [0.31, 0.29] if view == "front" else [0.12, 0.28],
-                    dtype=np.float32,
-                ),
-                "eye_open_mask": np.asarray(
-                    [True, True] if view == "front" else [False, True],
-                    dtype=np.bool_,
-                ),
-                "eye_state_valid": True,
                 "selected_eye": "both" if view == "front" else "right",
                 "eye_selection_valid": True,
             }
@@ -166,7 +157,6 @@ class _FailedAuxiliaryPreprocessor(_AuxiliaryPreprocessor):
                 "head_orientation_valid": False,
                 "face_origin_valid": False,
                 "head_pose_valid": False,
-                "eye_state_valid": False,
                 "eye_selection_valid": False,
                 "gaze_valid": False,
             }
@@ -234,9 +224,6 @@ class _Profile2DPreprocessor:
                 "head_pose_2d_valid": True,
                 "eye_angles": np.asarray([-0.2, 0.3], dtype=np.float32),
                 "iris_pose_2d": np.asarray([0.0, -0.6], dtype=np.float32),
-                "ear": np.asarray([0.31, np.nan], dtype=np.float32),
-                "eye_open_mask": np.asarray([True, False], dtype=np.bool_),
-                "eye_state_valid": True,
                 "selected_eye": "left",
                 "eye_selection_valid": True,
                 "gaze_valid": True,
@@ -276,9 +263,6 @@ def test_single_view_exposes_branch_prefixed_webeyetrack_auxiliary_tensors(
     assert item[f"{prefix}_face_origin_valid"].item() is (view == "front")
     assert item[f"{prefix}_head_pose_valid"].dtype == torch.bool
     assert item[f"{prefix}_gaze_valid"].dtype == torch.bool
-    assert item[f"{prefix}_ear"].shape == (2,)
-    assert item[f"{prefix}_eye_open_mask"].dtype == torch.bool
-    assert item[f"{prefix}_eye_state_valid"].item() is True
     assert item[f"{prefix}_selected_eye"] == selected_eye
     # Stable categorical encoding: left=0, right=1, both=2, unavailable=-1.
     assert item[f"{prefix}_selected_eye_index"].item() == selected_index
@@ -313,8 +297,6 @@ def test_paired_dataset_and_collate_expose_both_auxiliary_branches(tmp_path: Pat
     assert item["side_selected_eye"] == "right"
     assert batch["front_head_vector"].shape == (1, 3)
     assert batch["side_face_origin_3d"].shape == (1, 3)
-    assert batch["front_ear"].shape == (1, 2)
-    assert batch["side_eye_open_mask"].tolist() == [[False, True]]
     assert batch["front_selected_eye"] == ["both"]
     assert batch["side_selected_eye_index"].tolist() == [1]
     assert batch["front_head_pose_valid"].tolist() == [True]
@@ -408,9 +390,6 @@ def test_enabled_auxiliary_stages_keep_shapes_when_detection_is_invalid(tmp_path
     assert item["front_head_orientation_valid"].item() is False
     assert item["front_face_origin_valid"].item() is False
     assert item["front_head_pose_valid"].item() is False
-    assert torch.isnan(item["front_ear"]).all()
-    assert item["front_eye_open_mask"].tolist() == [False, False]
-    assert item["front_eye_state_valid"].item() is False
     assert item["front_selected_eye"] == "unknown"
     assert item["front_selected_eye_index"].item() == -1
     assert item["front_eye_selection_valid"].item() is False
@@ -516,10 +495,8 @@ def test_side_profile_annotations_and_derived_2d_pose_reach_model_batch(
     assert model_forward["side_iris_pose_2d"].dtype == torch.float32
     assert model_forward["side_iris_pose_2d"].tolist() == pytest.approx([0.0, -0.6])
 
-    # EAR and validity are intentionally outside the four SideModel.forward inputs.
-    assert item["side_ear"].tolist() == pytest.approx([0.31, np.nan], nan_ok=True)
+    # Validity remains outside the four SideModel.forward inputs.
     assert item["side_gaze_valid"].item() is True
-    assert "side_ear" not in model_forward
     assert "side_gaze_valid" not in model_forward
 
     without_derived_pose = dict(item)

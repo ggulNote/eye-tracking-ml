@@ -105,6 +105,14 @@ class CanonicalRecord:
     screen: ScreenCalibration
     pair_id: str | None = None
     facial_landmarks_xy: tuple[tuple[float, float], ...] = ()
+    # WebEyeTrack's metric head-pose contract. ``head_vector`` is a unit
+    # direction in the front-camera frame and ``face_origin_3d`` is expressed
+    # in centimetres.  They intentionally remain separate from the generic
+    # rotation/translation fields below because neither value is an Euler
+    # rotation nor a camera translation vector.
+    head_vector: tuple[float, float, float] | None = None
+    face_origin_3d: tuple[float, float, float] | None = None
+    head_pose_valid: bool = False
     head_rotation_3d: tuple[float, float, float] | None = None
     head_translation_3d: tuple[float, float, float] | None = None
     face_center_3d: tuple[float, float, float] | None = None
@@ -186,6 +194,8 @@ class CanonicalRecord:
         object.__setattr__(self, "facial_landmarks_xy", landmarks)
 
         for name in (
+            "head_vector",
+            "face_origin_3d",
             "head_rotation_3d",
             "head_translation_3d",
             "face_center_3d",
@@ -196,6 +206,16 @@ class CanonicalRecord:
                 name,
                 _optional_finite_tuple(getattr(self, name), length=3, field_name=name),
             )
+
+        object.__setattr__(self, "head_pose_valid", bool(self.head_pose_valid))
+        has_head_vector = self.head_vector is not None
+        has_face_origin = self.face_origin_3d is not None
+        if has_head_vector != has_face_origin:
+            raise DataContractError(
+                "head_vector and face_origin_3d must either both be present or both be absent"
+            )
+        if self.head_pose_valid and not has_head_vector:
+            raise DataContractError("head_pose_valid=true requires head_vector and face_origin_3d")
 
         if (self.face_center_3d is None) != (self.gaze_target_3d is None):
             raise DataContractError("face_center_3d and gaze_target_3d must be present together")
@@ -331,6 +351,9 @@ class CanonicalRecord:
             "screen_width_mm": self.screen.width_mm or "",
             "screen_height_mm": self.screen.height_mm or "",
             "facial_landmarks_xy": _json_sequence(self.facial_landmarks_xy),
+            "head_vector": _json_sequence(self.head_vector),
+            "face_origin_3d": _json_sequence(self.face_origin_3d),
+            "head_pose_valid": str(self.head_pose_valid).lower(),
             "head_rotation_3d": _json_sequence(self.head_rotation_3d),
             "head_translation_3d": _json_sequence(self.head_translation_3d),
             "face_center_3d": _json_sequence(self.face_center_3d),
@@ -381,6 +404,9 @@ MANIFEST_COLUMNS: tuple[str, ...] = (
     "screen_width_mm",
     "screen_height_mm",
     "facial_landmarks_xy",
+    "head_vector",
+    "face_origin_3d",
+    "head_pose_valid",
     "head_rotation_3d",
     "head_translation_3d",
     "face_center_3d",

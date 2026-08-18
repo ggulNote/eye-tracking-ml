@@ -1,0 +1,95 @@
+# 이름별 피험자 폴더의 head_down·neutral session만 사용하는 데이터 설정입니다.
+# 이 파일은 데이터 선택과 분할만 담당하며 model factory를 포함하지 않습니다.
+# 실행할 때 Front model profile과 Side model profile 하나를 별도로 마지막에 합칩니다.
+
+experiment:
+  name: measured_head_down_neutral
+  description: "보정된 dual-view frame의 head_down·neutral subject-wise 학습"
+  tags:
+    dataset: measured_named_dual_view
+    selected_sessions: head_down_neutral
+    split_unit: subject
+    roi_source: corrected_frames
+    pose_source: inputs_csv
+    sample_validity_source: inputs_csv_valid
+
+data:
+  dataset_name: measured_named_dual_view
+  reader:
+    type: generic_csv
+    # create_measured_data_manifest.py가 만드는 로컬 manifest입니다.
+    manifest_path: "${oc.env:MEASURED_DATA_MANIFEST,./data/measured_manifest.csv}"
+    verify_image_exists: true
+    verify_image_shape: true
+    target_bounds_policy: error
+
+  selection:
+    # builder에서도 선택하고 prepare에서도 다시 확인하는 명시적 allow-list입니다.
+    session_ids: [head_down, neutral]
+
+  pairing:
+    enabled: true
+    require_same_subject: true
+    require_same_target: true
+    max_target_distance_normalized: 0.0
+    unpaired_policy: error
+
+  split:
+    # seed를 고정한 무작위 피험자 분할입니다. 한 사람은 한 split에만 들어갑니다.
+    strategy: grouped_ratio
+    group_key: subject_id
+    ratios:
+      train: 0.70
+      validation: 0.15
+      test: 0.15
+    seed: "${experiment.seed}"
+    shuffle_groups: true
+    prevent_group_leakage: true
+
+  dataloader:
+    # 128x512 Front 입력과 Keras(torch backend)를 함께 쓰는 안전한 시작값입니다.
+    batch_size: 8
+    num_workers: 0
+    pin_memory: false
+    persistent_workers: false
+
+preprocessing:
+  cache:
+    # 같은 manifest·전처리 설정·원본 이미지이면 MediaPipe/ROI 결과를 .pkl에서 재사용합니다.
+    enabled: true
+    dir: "${paths.output_root}/preprocessed_cache"
+    mode: read_write
+    format: pickle
+    schema_version: 1
+    implementation_id: ordered-gaze-preprocessor-v2
+    trusted_local: true
+
+  branch_overrides:
+    front:
+      # 기존 eye_roi 파일이 아니라 보정된 web frame에서 매번 ROI를 새로 만듭니다.
+      metric_head_pose:
+        # inputs.csv의 MediaPipe head_vector·face_origin만 사용합니다.
+        source: precomputed_only
+        on_failure: error
+    side:
+      # 기존 Side ROI는 사용하지 않고 보정된 phone frame과 새 annotation으로 crop합니다.
+      enabled: true
+
+mlflow:
+  experiment_name: measured_head_down_neutral
+  # 로컬 manifest에는 피험자 폴더 경로가 있으므로 원격 artifact로 올리지 않습니다.
+  log_dataset_manifest: false
+  log_split_manifest: false
+  log_predictions: false
+  tags:
+    dataset: measured_named_dual_view
+    sessions: head_down_neutral
+    pose_source: inputs_csv
+    sample_validity_source: inputs_csv_valid
+    subject_wise_split: true
+    raw_images_logged: false
+
+metrics:
+  # 현재 manifest에는 화면 실제 크기(mm)가 없으므로 normalized subject metric을 사용합니다.
+  selection_metric: subject_macro_euclidean_normalized
+  fallback_selection_metric: euclidean_normalized_mean

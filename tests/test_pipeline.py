@@ -185,6 +185,144 @@ def test_prepare_data_writes_hashed_leakage_safe_manifests_and_oob_flag(
     assert not list(manifest_dir.rglob("*.png"))
 
 
+def test_session_selection_precedes_subject_wise_split_without_leakage(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    rows: list[dict[str, str]] = []
+    fieldnames = (*GENERIC_COLUMNS, "session_id")
+    for subject_index in range(5):
+        subject_id = f"p{subject_index:02d}"
+        for session_id in ("head_down", "neutral", "head_up"):
+            pair_id = f"{subject_id}-{session_id}-pair"
+            for view in ("front", "side"):
+                image_path = data_root / subject_id / session_id / view / "0001.png"
+                image_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("RGB", (32, 24), color=(subject_index * 20, 0, 0)).save(image_path)
+                rows.append(
+                    {
+                        "sample_id": f"{pair_id}-{view}",
+                        "subject_id": subject_id,
+                        "session_id": session_id,
+                        "view": view,
+                        "image_path": image_path.relative_to(data_root).as_posix(),
+                        "pair_id": pair_id,
+                        "target_x_px": "50",
+                        "target_y_px": "50",
+                        "screen_width_px": "100",
+                        "screen_height_px": "100",
+                    }
+                )
+
+    source_manifest = tmp_path / "source.csv"
+    with source_manifest.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+
+    config = {
+        "experiment": {"seed": 42},
+        "data": {
+            "dataset_name": "selected_sessions",
+            "dataset_root": str(data_root),
+            "reader": {"type": "generic_csv", "manifest_path": str(source_manifest)},
+            "selection": {"session_ids": ["head_down", "neutral"]},
+            "pairing": {
+                "enabled": True,
+                "require_same_subject": True,
+                "require_same_target": True,
+                "unpaired_policy": "error",
+            },
+            "split": {
+                "strategy": "grouped_ratio",
+                "group_key": "subject_id",
+                "ratios": {"train": 0.70, "validation": 0.15, "test": 0.15},
+                "seed": 42,
+                "shuffle_groups": True,
+                "manifest_dir": str(tmp_path / "prepared"),
+            },
+        },
+    }
+
+    result = prepare_data(config)
+
+    assert len(result.records) == 20
+    assert {record.session_id for record in result.records} == {"head_down", "neutral"}
+    assert len(result.pair_validation.complete_pair_ids) == 10
+    assert dict(result.split_counts) == {"train": 12, "validation": 4, "test": 4}
+    subjects = {
+        split_name: {record.subject_id for record in result.splits[split_name]}
+        for split_name in ("train", "validation", "test")
+    }
+    assert subjects == {
+        "train": {"p00", "p03", "p04"},
+        "validation": {"p02"},
+        "test": {"p01"},
+    }
+    assert subjects["train"].isdisjoint(subjects["validation"] | subjects["test"])
+    assert subjects["validation"].isdisjoint(subjects["test"])
+    assert result.summary["selection"] == {
+        "enabled": True,
+        "session_ids": ["head_down", "neutral"],
+        "selected_records": 20,
+        "dropped_records": 10,
+    }
+    assert result.summary["split"]["configured_ratios"] == {
+        "train": 0.70,
+        "validation": 0.15,
+        "test": 0.15,
+    }
+    assert result.summary["split"]["total_groups"] == 5
+    assert {
+        name: partition["realized_group_ratio"]
+        for name, partition in result.summary["split"]["partitions"].items()
+    } == {"train": 0.6, "validation": 0.2, "test": 0.2}
+
+
+def test_session_selection_rejects_unknown_session(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    image_path = data_root / "p00" / "neutral" / "front" / "0001.png"
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (32, 24)).save(image_path)
+    source_manifest = tmp_path / "source.csv"
+    with source_manifest.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=(*UNPAIRED_GENERIC_COLUMNS, "session_id"),
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "sample_id": "p00-neutral-front",
+                "subject_id": "p00",
+                "session_id": "neutral",
+                "view": "front",
+                "image_path": image_path.relative_to(data_root).as_posix(),
+                "target_x_px": "50",
+                "target_y_px": "50",
+                "screen_width_px": "100",
+                "screen_height_px": "100",
+            }
+        )
+
+    config = {
+        "data": {
+            "dataset_root": str(data_root),
+            "reader": {"type": "generic_csv", "manifest_path": str(source_manifest)},
+            "selection": {"session_ids": ["head_down"]},
+            "pairing": {"enabled": False},
+            "split": {
+                "strategy": "grouped_ratio",
+                "ratios": {"train": 1.0, "validation": 0.0, "test": 0.0},
+            },
+        }
+    }
+
+    with pytest.raises(DataPreparationError, match="absent from the manifest"):
+        prepare_data(config)
+
+
 def test_generic_csv_maps_source_and_custom_pair_key_and_preserves_metadata(
     tmp_path: Path,
 ) -> None:

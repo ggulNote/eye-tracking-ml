@@ -12,6 +12,7 @@ import random
 import re
 from collections import defaultdict
 from collections.abc import Mapping, MutableMapping, Sequence
+from copy import deepcopy
 from multiprocessing.context import get_spawning_popen
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,10 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, default_collate
 
+from .preprocessing_cache import (
+    PreprocessingCacheCorruptionError,
+    TrustedLocalPreprocessingCache,
+)
 from .transforms import GazePreprocessor, SampleDroppedError, SampleValidationError
 
 
@@ -47,9 +52,6 @@ _MODEL_AUXILIARY_SUFFIXES = (
     "face_origin_valid",
     "head_pose_valid",
     "gaze_valid",
-    "ear",
-    "eye_open_mask",
-    "eye_state_valid",
     "selected_eye",
     "selected_eye_index",
     "eye_selection_valid",
@@ -523,6 +525,47 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
         self.data_config = full_config.get("data", {}) if isinstance(full_config, Mapping) else {}
         self.side_front_3d_policy = _side_front_3d_policy(preprocessing_config or {})
 
+        self.preprocessing_cache: TrustedLocalPreprocessingCache | None = None
+        self.preprocessing_cache_mode = "off"
+        self._refreshed_cache_keys: set[str] = set()
+        cache_config = (
+            preprocessing_config.get("cache", {})
+            if isinstance(preprocessing_config, Mapping)
+            else {}
+        )
+        if cache_config is not None and not isinstance(cache_config, Mapping):
+            raise ManifestError("preprocessing.cache must be a mapping")
+        if isinstance(cache_config, Mapping) and bool(cache_config.get("enabled", False)):
+            mode = str(cache_config.get("mode", "read_write")).lower()
+            if mode not in {"read_write", "read_only", "refresh"}:
+                raise ManifestError(
+                    "preprocessing.cache.mode must be read_write, read_only, or refresh"
+                )
+            cache_dir = str(cache_config.get("dir", "")).strip()
+            if not cache_dir or cache_dir.startswith("${"):
+                raise ManifestError("preprocessing.cache.dir must resolve to a local path")
+            deterministic_config = deepcopy(dict(preprocessing_config or {}))
+            deterministic_config.pop("cache", None)
+            cache_identity_config = {
+                "preprocessing": deterministic_config,
+                "task": deepcopy(dict(self.task_config)),
+                # Train/evaluation interpolation and the augmentation boundary
+                # can differ even when a source manifest row has no split
+                # column, so split must be part of the cache namespace.
+                "dataset_split": "validation" if split == "val" else str(split or "train"),
+            }
+            self.preprocessing_cache = TrustedLocalPreprocessingCache(
+                cache_dir,
+                cache_identity_config,
+                trusted_local=bool(cache_config.get("trusted_local", False)),
+                schema_version=int(cache_config.get("schema_version", 1)),
+                implementation_id=str(
+                    cache_config.get("implementation_id", "ordered-gaze-preprocessor-v2")
+                ),
+                max_entry_bytes=int(cache_config.get("max_entry_bytes", 512 * 1024 * 1024)),
+            )
+            self.preprocessing_cache_mode = mode
+
         if data_root is None:
             configured_root = (
                 self.data_config.get("dataset_root")
@@ -739,7 +782,6 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
 
         return {
             "pose": stage_runs("metric_head_pose"),
-            "eye_state": stage_runs("eye_state"),
             "eye_selection": stage_runs("eye_selection"),
         }
 
@@ -794,6 +836,8 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
             "augmentation_seed": (int(augmentation_seed) if augmentation_seed is not None else -1),
         }
         for key, names in {
+            "head_vector": ("head_vector",),
+            "face_origin_3d": ("face_origin_3d", "face_origin_3d_cm"),
             "head_rotation_3d": ("head_rotation_3d", "head_rotation_json"),
             "head_translation_3d": ("head_translation_3d", "head_translation_json"),
             "face_center_3d": ("face_center_3d", "face_center_json"),
@@ -802,6 +846,9 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
             vector = _extract_vector(row, names, 3)
             if vector is not None:
                 metadata[key] = vector
+        declared_head_pose_valid = _bool_or_none(row.get("head_pose_valid"))
+        if declared_head_pose_valid is not None:
+            metadata["head_pose_valid"] = declared_head_pose_valid
         evaluation_eye = _clean_string(row.get("evaluation_eye"))
         if evaluation_eye:
             metadata["evaluation_eye"] = evaluation_eye
@@ -839,11 +886,21 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
             sample["landmarks_xy"] = landmarks.copy()
             sample["facial_landmarks_xy"] = landmarks.copy()
             metadata["source_landmarks_xy"] = landmarks.copy()
-        if augmentation_context is not None:
-            sample["_augmentation_context"] = dict(augmentation_context)
-
         try:
-            processed = self.preprocessor(sample)
+            processed: MutableMapping[str, Any]
+            if self.preprocessing_cache is None:
+                if augmentation_context is not None:
+                    sample["_augmentation_context"] = dict(augmentation_context)
+                processed = self.preprocessor(sample)
+            else:
+                processed = self._preprocess_with_cache(
+                    sample,
+                    row=row,
+                    view=view,
+                    image_path=image_path,
+                    augmentation_context=augmentation_context,
+                    augmentation_seed=augmentation_seed,
+                )
         except SampleDroppedError as exc:
             raise SampleDroppedError(
                 f"sample {_clean_string(row.get('sample_id'))!r} was configured to drop; "
@@ -871,13 +928,71 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
                 )
 
         target_tensor = torch.as_tensor(processed["target_gaze_xy"], dtype=torch.float32).reshape(2)
+        processed_metadata = processed.get("metadata", metadata)
+        if not isinstance(processed_metadata, Mapping):
+            raise SampleValidationError("preprocessing output metadata must be a mapping")
         result_metadata = self._tensorize_metadata(
             processed,
-            metadata,
+            processed_metadata,
             image,
             expected_auxiliary=expected_auxiliary,
         )
         return image.contiguous(), target_tensor, result_metadata
+
+    def _preprocess_with_cache(
+        self,
+        sample: MutableMapping[str, Any],
+        *,
+        row: Mapping[str, Any],
+        view: str,
+        image_path: Path,
+        augmentation_context: Mapping[str, Any] | None,
+        augmentation_seed: int | None,
+    ) -> MutableMapping[str, Any]:
+        assert self.preprocessing_cache is not None
+        cache_identity = self.preprocessing_cache.identity(
+            row=row,
+            view=view,
+            image_path=image_path,
+        )
+        cached_payload: Any | None = None
+        should_refresh = (
+            self.preprocessing_cache_mode == "refresh"
+            and cache_identity.key not in self._refreshed_cache_keys
+        )
+        if not should_refresh:
+            cached_payload = self.preprocessing_cache.load(cache_identity)
+        cache_hit = cached_payload is not None
+        if cache_hit:
+            if not isinstance(cached_payload, MutableMapping):
+                raise PreprocessingCacheCorruptionError(
+                    "preprocessing cache payload must be a mutable mapping"
+                )
+            processed = cached_payload
+        else:
+            processed = self.preprocessor.preprocess_deterministic(sample)
+            if self.preprocessing_cache_mode in {"read_write", "refresh"}:
+                cache_payload = deepcopy(dict(processed))
+                cache_payload.pop("_augmentation_context", None)
+                if isinstance(cache_payload.get("image_path"), Path):
+                    cache_payload["image_path"] = str(cache_payload["image_path"])
+                self.preprocessing_cache.store(cache_identity, cache_payload)
+                if self.preprocessing_cache_mode == "refresh":
+                    self._refreshed_cache_keys.add(cache_identity.key)
+        processed_metadata = processed.get("metadata")
+        if isinstance(processed_metadata, MutableMapping):
+            # Deterministic cache entries can originate in a previous epoch.
+            # Augmentation is re-applied on every access, so its provenance
+            # must also describe the current access instead of the cache fill.
+            processed_metadata["augmentation_epoch"] = self.epoch
+            processed_metadata["augmentation_seed"] = (
+                int(augmentation_seed) if augmentation_seed is not None else -1
+            )
+            processed_metadata["preprocessing_cache_hit"] = cache_hit
+            processed_metadata["preprocessing_cache_key"] = cache_identity.key
+        if augmentation_context is not None:
+            processed["_augmentation_context"] = dict(augmentation_context)
+        return self.preprocessor.apply_augmentation(processed)
 
     @staticmethod
     def _tensorize_metadata(
@@ -947,6 +1062,10 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
             result["evaluation_eye"] = str(metadata["evaluation_eye"])
         if "representation" in metadata:
             result["representation"] = str(metadata["representation"])
+        if "preprocessing_cache_hit" in metadata:
+            result["preprocessing_cache_hit"] = bool(metadata["preprocessing_cache_hit"])
+        if "preprocessing_cache_key" in metadata:
+            result["preprocessing_cache_key"] = str(metadata["preprocessing_cache_key"])
         if "landmark_kind" in metadata:
             result["landmark_kind"] = str(metadata["landmark_kind"])
         if "landmark_source" in metadata:
@@ -972,7 +1091,7 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
         }.items():
             if key in metadata:
                 result[key] = torch.as_tensor(metadata[key], dtype=torch.float32).reshape(shape)
-        for key in ("face_origin_unit", "face_origin_source", "gaze_state", "visible_eye"):
+        for key in ("face_origin_unit", "face_origin_source", "visible_eye"):
             if key in metadata:
                 result[key] = str(metadata[key])
         if "eye_annotation_valid" in metadata:
@@ -981,11 +1100,6 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
             )
         if "invalid_reasons" in metadata:
             result["invalid_reasons"] = [str(reason) for reason in metadata["invalid_reasons"]]
-        if "ear_threshold" in metadata:
-            result["ear_threshold"] = torch.tensor(
-                float(metadata["ear_threshold"]), dtype=torch.float32
-            )
-
         pose_expected = bool(expected_auxiliary.get("pose")) or any(
             key in sample or key in metadata
             for key in (
@@ -1034,34 +1148,6 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
                 dtype=torch.bool,
             )
 
-        eye_state_expected = bool(expected_auxiliary.get("eye_state")) or any(
-            key in sample or key in metadata
-            for key in ("ear", "eye_open_mask", "eye_state_valid", "gaze_state")
-        )
-        if eye_state_expected:
-            ear_value = auxiliary_value("ear")
-            if ear_value is None:
-                ear_value = [
-                    auxiliary_value("ear_left", default=np.nan),
-                    auxiliary_value("ear_right", default=np.nan),
-                ]
-            ear = torch.as_tensor(ear_value, dtype=torch.float32).reshape(2)
-            eye_open_mask = torch.as_tensor(
-                auxiliary_value("eye_open_mask", default=[False, False]),
-                dtype=torch.bool,
-            ).reshape(2)
-            result["ear"] = ear
-            result["eye_open_mask"] = eye_open_mask
-            result["eye_state_valid"] = torch.tensor(
-                bool(
-                    auxiliary_value(
-                        "eye_state_valid",
-                        default=bool(torch.isfinite(ear).all().item()),
-                    )
-                ),
-                dtype=torch.bool,
-            )
-
         selection_expected = bool(expected_auxiliary.get("eye_selection")) or any(
             key in sample or key in metadata
             for key in ("selected_eye", "eye_selection_valid", "eye_visibility_score")
@@ -1092,7 +1178,7 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
         if head_pose_2d_valid is not None:
             result["head_pose_2d_valid"] = torch.tensor(bool(head_pose_2d_valid), dtype=torch.bool)
 
-        if pose_expected or eye_state_expected or selection_expected:
+        if pose_expected or selection_expected:
             result["gaze_valid"] = torch.tensor(
                 bool(auxiliary_value("gaze_valid", default=True)), dtype=torch.bool
             )
@@ -1276,17 +1362,12 @@ def _missing_auxiliary_value(key: str) -> Any:
         return torch.full((3,), torch.nan, dtype=torch.float32)
     if suffix in {"head_pose_2d", "eye_pose_2d", "iris_pose_2d", "eye_angles"}:
         return torch.full((2,), torch.nan, dtype=torch.float32)
-    if suffix == "ear":
-        return torch.full((2,), torch.nan, dtype=torch.float32)
-    if suffix == "eye_open_mask":
-        return torch.zeros(2, dtype=torch.bool)
     if suffix in {
         "head_pose_valid",
         "head_pose_2d_valid",
         "head_orientation_valid",
         "face_origin_valid",
         "gaze_valid",
-        "eye_state_valid",
         "eye_selection_valid",
     }:
         return torch.tensor(False, dtype=torch.bool)

@@ -26,30 +26,27 @@ preprocessing:
         enabled: false
       eye_selection:
         enabled: false
-      eye_state:
-        enabled: false
       metric_head_pose:
         enabled: false
 
       eye_region_warp:
         # 이 단계는 feature 선택과 관계없이 side_image를 항상 생성합니다.
+        # 입력 image_path는 feature_maps/phone/frames의 보정 frame이어야 합니다.
+        # 기존 eye ROI, 피험자 공통 고정 bbox, 더미 landmark는 학습 입력으로 허용하지 않습니다.
         enabled: true
         method: profile90_annotation
         # 최종 한쪽 눈 tensor의 [높이, 너비]입니다.
         size_hw: [128, 256]
-        # 각 측면 annotation row에서 읽을 key입니다.
+        # 각 frame마다 별도로 검출·검수한 manifest annotation에서 읽을 key입니다.
         bbox_key: visible_eye_bbox_xyxy
         eyelid_keypoints_key: visible_eye_keypoints_xy
         iris_center_key: iris_center_xy
         head_origin_key: profile_head_origin_xy
         head_forward_key: profile_head_forward_xy
         # 눈꺼풀 6점으로 기울기를 보정한 2:1 crop을 만듭니다.
-        # bbox만 있으면 EAR을 계산할 수 없습니다.
         crop_mode: affine
         # 눈 너비와 눈 뜬 높이에 곱할 crop 여백 비율입니다.
         landmark_crop_scale_xy: [2.4, 1.2]
-        # 측면용 초기 EAR 기준이며 새 DB의 validation split으로 보정해야 합니다.
-        ear_threshold: 0.20
         # a0=p4 눈꼬리, a1=p3 위쪽 점, a2=p5 아래쪽 점입니다.
         eyelid_tail_indices: [3, 2, 4]
         # 아래 값은 보조 feature만 선택하며 side_image 생성에는 영향을 주지 않습니다.
@@ -79,9 +76,8 @@ preprocessing:
             vertical_only: true  # true이면 가로 성분을 0으로 두고 세로 성분만 사용합니다.
         # 눈꺼풀 6점이 없을 때 bbox에 적용할 [가로, 세로] 확대 비율입니다.
         bbox_scale_xy: [1.25, 1.50]
-        pad_rgb: [0, 0, 0]  # 원본 이미지 밖의 영역은 검은색으로 채웁니다.
-        # 감긴 눈과 실패 sample은 검은 tensor로 유지하고 유효성 mask를 끕니다.
-        on_closed: mark_invalid
+        pad_rgb: [0, 0, 0]  # affine 모드에서만 원본 밖의 영역에 사용합니다.
+        # annotation이나 ROI geometry 실패 sample은 무효 tensor로 유지합니다.
         on_failure: mark_invalid
 
       face_roi:
@@ -161,10 +157,6 @@ model:
           vertical_only: true
       diagnostics:
         # 진단값은 기록과 시각화에만 사용하며 모델에는 전달하지 않습니다.
-        ear:
-          key: side_ear
-          role: selected_eye_open_closed_quality
-          passed_to_model: false
         selected_eye:
           key: side_selected_eye_index
           role: annotation_traceability
@@ -182,7 +174,7 @@ model:
       embedding_shape: [B, 256]
 
 loss:
-  # side_gaze_valid가 true인 row만 Side residual loss에 사용합니다.
+  # annotation과 ROI 생성이 유효한 row만 Side residual loss에 사용합니다.
   branch_auxiliary:
     enabled: true
     side_weight: 1.0

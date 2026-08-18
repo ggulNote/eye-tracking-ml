@@ -1,7 +1,7 @@
 # WebEyeTrack과 호환되는 정면 입력 전처리 설정입니다.
 # 전처리와 입력 계약 검증은 구현되어 있습니다.
 # generic PyTorch 모델 실행·학습·평가는 구현되어 있습니다.
-# 공식 .keras는 data_ver1_smoke profile의 검증된 Keras(torch backend) factory로 실행합니다.
+# 공식 .keras는 front_webeyetrack model profile의 검증된 Keras(torch backend) factory로 실행합니다.
 # generic pretrained.path는 여전히 `.pt`/`.pth` state_dict 전용입니다.
 
 experiment:
@@ -43,21 +43,11 @@ preprocessing:
         canonicalize_to: none  # 해부학적 좌우 방향을 유지합니다.
         on_failure: mark_invalid
 
-      eye_state:
-        enabled: true
-        method: ear
-        # 초기 EAR 기준이며 새 DB의 validation 사람들로 보정해야 합니다.
-        threshold: 0.20
-        # 정면에서 한쪽 눈이라도 감기면 해당 시선 sample을 사용하지 않습니다.
-        required_eye_policy: all_open
-        on_closed: mark_invalid
-        landmark_indices:
-          left: [362, 385, 387, 263, 373, 380]
-          right: [133, 158, 160, 33, 144, 153]
-        on_failure: mark_invalid
-
       metric_head_pose:
         enabled: true
+        # manifest의 검증된 pose를 우선 사용하고, 없을 때만 corrected frame에서 재계산합니다.
+        source: precomputed_or_reconstruct
+        precomputed_face_origin_unit: cm
         method: webeyetrack_radial_procrustes
         output_unit: cm
         # 공식 .keras 모델은 head_vector와 face_origin_3d를 함께 입력받습니다.
@@ -104,7 +94,7 @@ data:
 model:
   front:
     enabled: true
-    # 이 profile은 전처리 계약만 고정합니다. 공식 model factory는 data_ver1_smoke에서 연결합니다.
+    # 이 profile은 전처리 계약만 고정합니다. 공식 model factory는 별도 model profile에서 연결합니다.
     source_dir: null
     entrypoint: null
     adapter_entrypoint: null
@@ -126,7 +116,7 @@ model:
       strict: true  # checkpoint의 이름과 shape가 정확히 일치해야 합니다.
     input_contract:
       # pipeline은 PyTorch CHW 형식을 사용하며 TensorFlow adapter가 NHWC로 바꿉니다.
-      # validity_key는 감긴 눈이나 전처리 실패 sample을 제외합니다.
+      # validity_key는 landmark·pose·ROI 생성에 실패한 sample을 제외합니다.
       image_key: front_image
       shape: [B, 3, 128, 512]
       dtype: float32

@@ -55,6 +55,29 @@ def test_grouped_ratio_split_is_deterministic_and_subject_disjoint() -> None:
     assert subjects["validation"].isdisjoint(subjects["test"])
 
 
+def test_five_subject_ratio_is_three_one_one_and_seed_controls_assignment() -> None:
+    records = [record(f"p{index:02d}") for index in range(5)]
+
+    seed_42 = deterministic_group_split(records, seed=42)
+    seed_42_again = deterministic_group_split(list(reversed(records)), seed=42)
+    seed_1 = deterministic_group_split(records, seed=1)
+
+    subjects_42 = {name: {item.subject_id for item in items} for name, items in seed_42.items()}
+    subjects_42_again = {
+        name: {item.subject_id for item in items} for name, items in seed_42_again.items()
+    }
+    subjects_1 = {name: {item.subject_id for item in items} for name, items in seed_1.items()}
+    assert {name: len(items) for name, items in subjects_42.items()} == {
+        "train": 3,
+        "validation": 1,
+        "test": 1,
+    }
+    assert subjects_42_again == subjects_42
+    assert subjects_1 != subjects_42
+    assert subjects_42["train"].isdisjoint(subjects_42["validation"] | subjects_42["test"])
+    assert subjects_42["validation"].isdisjoint(subjects_42["test"])
+
+
 def test_explicit_front_side_pair_is_accepted() -> None:
     records = [
         record("p01", view="front", pair_id="g1"),

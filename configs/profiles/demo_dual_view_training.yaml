@@ -70,11 +70,9 @@ preprocessing:
         head_forward_key: profile_head_forward_xy
         crop_mode: affine
         landmark_crop_scale_xy: [2.4, 1.2]
-        ear_threshold: 0.10
         eyelid_tail_indices: [3, 2, 4]
         bbox_scale_xy: [1.25, 1.50]
         pad_rgb: [0, 0, 0]
-        on_closed: mark_invalid
         on_failure: mark_invalid
       resize:
         enabled: false

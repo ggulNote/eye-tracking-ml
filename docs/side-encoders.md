@@ -7,23 +7,16 @@ model profile을 마지막에 적용하면 runtime loader가 선택한 entrypoin
 
 ## 구현 범위
 
-이번 작업에 포함된 범위는 다음과 같습니다.
+현재 다음 항목이 실제 학습 실행기에 연결되어 있습니다.
 
 - MobileNetV4-Conv-S Side model factory
 - BlazeGaze convolution transfer Side model factory
 - 두 model에서 공유하는 auxiliary projection과 output head
-- preprocessing profile을 복사하지 않는 model별 작은 config override
+- 전처리와 분리된 model별 Config override
 - 공식 BlazeGaze `.keras`의 encoder-only weight converter
-- 위 기능의 단위 테스트와 config resolve 테스트
-
-다음 항목은 구현하거나 변경하지 않았습니다.
-
-- canonical Front/Side preprocessing과 Dataset contract
-- runtime model loader, registry와 adapter
-- Trainer, loss, metric, optimizer와 scheduler
-- Front Encoder
-- late fusion과 residual target 생성
-- checkpoint 관리, MLflow 학습과 inference pipeline
+- YAML entrypoint runtime loader와 default adapter
+- Dataset·Trainer·Y축 residual fusion·checkpoint·MLflow
+- Config resolve, model forward와 1-batch 학습 테스트
 
 ## Side tensor contract
 
@@ -51,9 +44,10 @@ side_iris_pose_2d: float32[B,2]
 | `quality` | optional `float32[B,1]` | sigmoid가 적용된 `[0,1]` 신호 |
 
 현재 두 factory는 세 key를 모두 반환합니다. Downstream adapter는 `delta_y_side`와
-`side_embedding`을 필수로 다루고 `quality`는 존재할 때 소비할 수 있습니다. `quality`는
-`side_gaze_valid`를 대체하지 않습니다. Side 모델은 독립적인 x 좌표나 `gaze_xy`를 반환하지
-않습니다. Downstream fusion은 `delta_y_side`를 Front branch의 y 예측에 더합니다.
+`side_embedding`을 필수로 다루고 `quality`는 존재할 때 shape만 검증합니다. 현재 Trainer에는
+quality target/loss가 없으므로 `quality_head`는 학습되지 않으며 해당 값을 품질 점수로 해석하면
+안 됩니다. `quality`는 `side_gaze_valid`를 대체하지 않습니다. Side 모델은 독립적인 x 좌표나
+`gaze_xy`를 반환하지 않습니다. Fusion은 `delta_y_side`를 Front branch의 y 예측에 더합니다.
 
 ## Model entrypoint
 
@@ -72,10 +66,13 @@ Config는 반드시 다음 순서로 합성합니다. 뒤의 model profile은 pr
 override합니다.
 
 ```text
-1. configs/config.yaml                              # base
-2. configs/profiles/blazegaze.yaml                 # Front preprocessing
-3. configs/profiles/side_profile_90.yaml           # Side preprocessing
-4. configs/models/<selected-side-model>.yaml       # model 선택
+1. configs/config.yaml
+2. configs/profiles/blazegaze.yaml
+3. configs/profiles/side_profile_90.yaml
+4. configs/profiles/side_roi_only.yaml
+5. configs/profiles/measured_head_down_neutral.yaml
+6. configs/models/front_webeyetrack.yaml
+7. configs/models/<selected-side-model>.yaml
 ```
 
 BlazeGaze transfer profile 검증:
@@ -253,9 +250,9 @@ make check
 TensorFlow와 실제 `.keras`가 없는 기본 suite에서는 parity 검사 한 개만 skip됩니다. TensorFlow는
 main `requirements.txt`의 runtime dependency가 아닙니다.
 
-## Loader/adapter handoff contract
+## Runtime/adapter contract
 
-Downstream loader/adapter 담당자는 다음 경계를 유지해야 합니다.
+현재 loader와 adapter는 다음 경계를 유지합니다.
 
 1. Base → Front preprocessing → Side preprocessing → selected model 순서로 resolve된
    `model.side.entrypoint`와 `init_args`를 사용합니다.
@@ -270,6 +267,3 @@ Downstream loader/adapter 담당자는 다음 경계를 유지해야 합니다.
    Front의 x를 유지하고 `front.gaze_xy[:,1:2] + side.delta_y_side`로 최종 y를 구성합니다.
 7. 일반 training checkpoint 처리와 BlazeGaze encoder-only transfer payload를 혼합하지
    않습니다.
-
-현재 runtime loader의 default adapter는 이 contract를 사용하여 두 Side factory를 호출하고
-표준 residual output을 검증합니다.

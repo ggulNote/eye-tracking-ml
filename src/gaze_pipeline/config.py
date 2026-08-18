@@ -36,7 +36,6 @@ SUPPORTED_PREPROCESSING_STAGES = (
     "validate",
     "face_landmarks",
     "eye_selection",
-    "eye_state",
     "metric_head_pose",
     "eye_region_warp",
     "face_roi",
@@ -246,6 +245,7 @@ def validate_config(
 
     data = _expect_mapping(config, "data", issues)
     _validate_image_data(data, issues)
+    _validate_data_selection(data, issues)
     available_branches = _validate_views(data, issues)
     pairing_enabled = _validate_pairing(data, available_branches, issues)
     _validate_split(data, issues)
@@ -680,6 +680,42 @@ def _validate_image_data(data: Mapping[str, Any], issues: list[str]) -> None:
         )
 
 
+def _validate_data_selection(data: Mapping[str, Any], issues: list[str]) -> None:
+    """Validate optional record selection before pairing and splitting.
+
+    ``session_ids`` is deliberately an allow-list rather than a filename/path
+    pattern.  The manifest builder owns path discovery, while the core data
+    pipeline selects on the canonical ``session_id`` contract.
+    """
+
+    selection = data.get("selection")
+    if selection is None:
+        return
+    if not isinstance(selection, Mapping):
+        issues.append("data.selection은 YAML mapping이어야 합니다.")
+        return
+
+    session_ids = selection.get("session_ids")
+    if session_ids is None:
+        return
+    if not isinstance(session_ids, list) or not session_ids:
+        issues.append(
+            "data.selection.session_ids는 null 또는 비어 있지 않은 session 문자열 list여야 합니다."
+        )
+        return
+
+    normalized: list[str] = []
+    for value in session_ids:
+        if not isinstance(value, str) or not value.strip():
+            issues.append(
+                "data.selection.session_ids의 각 값은 비어 있지 않은 문자열이어야 합니다."
+            )
+            continue
+        normalized.append(value.strip())
+    if len(normalized) != len(set(normalized)):
+        issues.append("data.selection.session_ids에 중복 session이 있습니다.")
+
+
 def _validate_views(data: Mapping[str, Any], issues: list[str]) -> set[str]:
     views = data.get("views")
     if not isinstance(views, Mapping):
@@ -829,6 +865,49 @@ def _validate_preprocessing(
     available_branches: set[str],
     issues: list[str],
 ) -> None:
+    cache = preprocessing.get("cache", {})
+    if not isinstance(cache, Mapping):
+        issues.append("preprocessing.cache는 mapping이어야 합니다.")
+    else:
+        enabled = cache.get("enabled", False)
+        if not isinstance(enabled, bool):
+            issues.append("preprocessing.cache.enabled는 true/false여야 합니다.")
+        if enabled is True:
+            if str(cache.get("format", "pickle")).lower() != "pickle":
+                issues.append("preprocessing.cache.format은 현재 pickle만 지원합니다.")
+            _validate_enum(
+                cache.get("mode", "read_write"),
+                "preprocessing.cache.mode",
+                {"read_write", "read_only", "refresh"},
+                issues,
+            )
+            cache_dir = cache.get("dir")
+            if not isinstance(cache_dir, str) or not cache_dir.strip():
+                issues.append("preprocessing.cache.dir은 비어 있지 않은 경로 문자열이어야 합니다.")
+            if cache.get("trusted_local") is not True:
+                issues.append(
+                    "pickle cache를 사용하려면 preprocessing.cache.trusted_local=true가 필요합니다."
+                )
+            schema_version = cache.get("schema_version", 1)
+            if (
+                isinstance(schema_version, bool)
+                or not isinstance(schema_version, int)
+                or schema_version <= 0
+            ):
+                issues.append("preprocessing.cache.schema_version은 양의 정수여야 합니다.")
+            implementation_id = cache.get("implementation_id")
+            if not isinstance(implementation_id, str) or not implementation_id.strip():
+                issues.append(
+                    "preprocessing.cache.implementation_id는 비어 있지 않은 문자열이어야 합니다."
+                )
+            max_entry_bytes = cache.get("max_entry_bytes", 512 * 1024 * 1024)
+            if (
+                isinstance(max_entry_bytes, bool)
+                or not isinstance(max_entry_bytes, int)
+                or max_entry_bytes <= 0
+            ):
+                issues.append("preprocessing.cache.max_entry_bytes는 양의 정수여야 합니다.")
+
     order = preprocessing.get("stage_order")
     valid_order: list[str] = []
     if not isinstance(order, list) or not order:
@@ -1018,14 +1097,6 @@ def _validate_branch_stage_overrides(
         effective,
         stage_order,
         branch=branch,
-        dependent="eye_state",
-        prerequisite="face_landmarks",
-        issues=issues,
-    )
-    _require_effective_stage_dependency(
-        effective,
-        stage_order,
-        branch=branch,
         dependent="metric_head_pose",
         prerequisite="face_landmarks",
         issues=issues,
@@ -1055,7 +1126,6 @@ def _validate_branch_stage_overrides(
     )
 
     eye_selection = effective.get("eye_selection", {})
-    eye_state = effective.get("eye_state", {})
     metric_head_pose = effective.get("metric_head_pose", {})
     selection_mode = str(eye_selection.get("mode", "both")).lower()
     if eye_selection.get("enabled") is True and selection_mode == "best_visible":
@@ -1065,17 +1135,6 @@ def _validate_branch_stage_overrides(
                 f"{branch}.eye_selection.mode={selection_mode!r}이면 "
                 f"{branch}.face_landmarks.output_visibility_presence=true가 필요합니다."
             )
-
-    required_eye_policy = str(eye_state.get("required_eye_policy", "all_open")).lower()
-    if eye_state.get("enabled") is True and required_eye_policy == "selected_eye_open":
-        _require_effective_stage_dependency(
-            effective,
-            stage_order,
-            branch=branch,
-            dependent="eye_state",
-            prerequisite="eye_selection",
-            issues=issues,
-        )
 
     if eye_region_warp.get("enabled") is True and warp_method in {
         "selected_eye_similarity",
@@ -1167,39 +1226,7 @@ def _validate_branch_stage_overrides(
         stage_order,
         branch=branch,
         before="eye_selection",
-        after="eye_state",
-        issues=issues,
-    )
-    _require_enabled_stage_order(
-        effective,
-        stage_order,
-        branch=branch,
-        before="eye_selection",
         after="eye_region_warp",
-        issues=issues,
-    )
-    _require_enabled_stage_order(
-        effective,
-        stage_order,
-        branch=branch,
-        before="eye_state",
-        after="eye_region_warp",
-        issues=issues,
-    )
-    _require_enabled_stage_order(
-        effective,
-        stage_order,
-        branch=branch,
-        before="eye_state",
-        after="face_roi",
-        issues=issues,
-    )
-    _require_enabled_stage_order(
-        effective,
-        stage_order,
-        branch=branch,
-        before="eye_state",
-        after="resize",
         issues=issues,
     )
     _require_enabled_stage_order(
@@ -1447,41 +1474,24 @@ def _validate_stage_options(
                 {"none", "left", "right"},
                 issues,
             )
-    elif stage == "eye_state":
-        _validate_enum(
-            stage_config.get("method", "ear"),
-            f"{field}.method",
-            {"ear"},
-            issues,
-        )
-        threshold = stage_config.get("threshold", 0.20)
-        if not _is_finite_number_in_range(threshold, minimum=0.0, maximum=1.0):
-            issues.append(f"{field}.threshold는 0 이상 1 이하의 숫자여야 합니다.")
-        _validate_enum(
-            stage_config.get("required_eye_policy", "all_open"),
-            f"{field}.required_eye_policy",
-            {"all_open", "any_open", "selected_eye_open"},
-            issues,
-        )
-        _validate_enum(
-            stage_config.get("on_closed", "mark_invalid"),
-            f"{field}.on_closed",
-            {"mark_invalid", "mask", "suppress", "drop", "error", "keep", "ignore"},
-            issues,
-        )
-        landmark_indices = stage_config.get("landmark_indices")
-        if landmark_indices is not None:
-            if not isinstance(landmark_indices, Mapping):
-                issues.append(f"{field}.landmark_indices는 left/right mapping이어야 합니다.")
-            else:
-                for eye in ("left", "right"):
-                    indices = landmark_indices.get(eye)
-                    if not _is_nonnegative_int_list(indices, length=6):
-                        issues.append(
-                            f"{field}.landmark_indices.{eye}는 음이 아닌 정수 6개의 list여야 "
-                            "합니다."
-                        )
     elif stage == "metric_head_pose":
+        _validate_enum(
+            stage_config.get("source", "reconstruct"),
+            f"{field}.source",
+            {
+                "reconstruct",
+                "precomputed",
+                "precomputed_only",
+                "precomputed_or_reconstruct",
+            },
+            issues,
+        )
+        _validate_enum(
+            stage_config.get("precomputed_face_origin_unit", "cm"),
+            f"{field}.precomputed_face_origin_unit",
+            {"cm", "mm"},
+            issues,
+        )
         _validate_enum(
             stage_config.get("method", "webeyetrack_radial_procrustes"),
             f"{field}.method",
@@ -1648,7 +1658,7 @@ def _validate_stage_options(
             _validate_enum(
                 stage_config.get("crop_mode", "affine"),
                 f"{field}.crop_mode",
-                {"affine", "letterbox"},
+                {"affine", "letterbox", "stretch"},
                 issues,
             )
             for key in ("landmark_crop_scale_xy", "bbox_scale_xy"):
@@ -1659,10 +1669,6 @@ def _validate_stage_options(
                         and all(math.isfinite(float(item)) and float(item) > 0 for item in scale)
                     ):
                         issues.append(f"{field}.{key}는 양의 숫자 2개여야 합니다.")
-            if "ear_threshold" in stage_config and not _is_positive_finite_number(
-                stage_config.get("ear_threshold")
-            ):
-                issues.append(f"{field}.ear_threshold는 양의 숫자여야 합니다.")
             if "eyelid_tail_indices" in stage_config:
                 tail_indices = stage_config.get("eyelid_tail_indices")
                 valid_tail_indices = _is_nonnegative_int_list(tail_indices, length=3) and tuple(
@@ -1684,12 +1690,6 @@ def _validate_stage_options(
                     issues.append(
                         f"{field}.{key}는 비어 있지 않은 metadata field 이름이어야 합니다."
                     )
-            _validate_enum(
-                stage_config.get("on_closed", "mark_invalid"),
-                f"{field}.on_closed",
-                {"mark_invalid", "mask", "suppress", "drop", "error", "keep", "ignore"},
-                issues,
-            )
     elif stage == "face_roi":
         if "source" in stage_config:
             _validate_enum(
@@ -2332,6 +2332,62 @@ def _validate_execution_config(config: Mapping[str, Any], issues: list[str]) -> 
                 "loss.primary.name은 Huber, MSE 또는 weighted_l2 계열이어야 합니다 "
                 f"(입력값: {loss_name!r})."
             )
+
+    metrics = _expect_mapping(config, "metrics", issues)
+    threshold_rates = metrics.get("threshold_rates", [])
+    threshold_names: set[str] = set()
+    if not isinstance(threshold_rates, list):
+        issues.append("metrics.threshold_rates는 mapping list여야 합니다.")
+    else:
+        for index, specification in enumerate(threshold_rates):
+            field = f"metrics.threshold_rates[{index}]"
+            if not isinstance(specification, Mapping):
+                issues.append(f"{field}는 mapping이어야 합니다.")
+                continue
+            name = specification.get("name")
+            if not isinstance(name, str) or not name.strip():
+                issues.append(f"{field}.name은 비어 있지 않은 문자열이어야 합니다.")
+            elif name in threshold_names:
+                issues.append(f"{field}.name은 중복될 수 없습니다: {name!r}.")
+            else:
+                threshold_names.add(name)
+            _validate_enum(
+                specification.get("unit", "normalized"),
+                f"{field}.unit",
+                {"normalized", "pixel", "cm"},
+                issues,
+            )
+            if not _is_positive_finite_number(specification.get("threshold")):
+                issues.append(f"{field}.threshold는 0보다 큰 유한한 수여야 합니다.")
+            if "enabled" in specification and not isinstance(specification.get("enabled"), bool):
+                issues.append(f"{field}.enabled는 true/false여야 합니다.")
+    report = metrics.get("report")
+    if not isinstance(report, list) or not all(isinstance(name, str) for name in report):
+        issues.append("metrics.report는 metric 이름 문자열 list여야 합니다.")
+    else:
+        known_metrics = {
+            "euclidean_normalized_mean",
+            "euclidean_normalized_median",
+            "mae_x_normalized",
+            "mae_y_normalized",
+            "rmse_normalized",
+            "out_of_bounds_rate",
+            "subject_macro_euclidean_normalized",
+            "euclidean_pixel_mean",
+            "subject_macro_euclidean_pixel",
+            "euclidean_cm_mean",
+            "p90_euclidean_cm",
+            "p95_euclidean_cm",
+            "subject_macro_euclidean_cm",
+            *threshold_names,
+        }
+        unknown_metrics = sorted(set(report) - known_metrics)
+        if unknown_metrics:
+            issues.append(f"metrics.report에 지원하지 않는 이름이 있습니다: {unknown_metrics}.")
+    for key in ("selection_metric", "fallback_selection_metric"):
+        value = metrics.get(key)
+        if not isinstance(value, str) or not value.strip():
+            issues.append(f"metrics.{key}은 비어 있지 않은 metric 이름이어야 합니다.")
 
     checkpoint = _expect_mapping(config, "checkpoint", issues)
     save_best = checkpoint.get("save_best")

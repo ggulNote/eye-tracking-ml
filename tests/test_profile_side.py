@@ -7,7 +7,6 @@ import pytest
 from gaze_pipeline.data.profile_side import (
     ProfileSideGeometryError,
     preprocess_profile_side,
-    selected_eye_ear,
 )
 
 
@@ -47,7 +46,6 @@ def test_affine_profile_preprocessing_returns_expected_geometry() -> None:
     assert result.eyelid_center_xy.tolist() == pytest.approx([100.0, 50.0])
     assert result.eye_size_xy.tolist() == pytest.approx([40.0, 12.0])
     assert result.eye_pose_2d.tolist() == pytest.approx([0.05, -1.0 / 3.0])
-    assert result.ear == pytest.approx(0.3)
     np.testing.assert_allclose(
         result.eyelid_tail_points_xy,
         [[120.0, 50.0], [110.0, 44.0], [110.0, 56.0]],
@@ -170,7 +168,7 @@ def test_eye_local_direction_angles_support_semantically_reordered_tail_indices(
     )
 
 
-def test_bbox_only_letterbox_returns_pose_but_not_ear() -> None:
+def test_bbox_only_letterbox_returns_pose() -> None:
     result = preprocess_profile_side(
         _image(),
         eye_bbox_xyxy=[20, 20, 60, 60],
@@ -182,7 +180,6 @@ def test_bbox_only_letterbox_returns_pose_but_not_ear() -> None:
     )
 
     assert result.patch.shape == (128, 256, 3)
-    assert result.ear is None
     assert result.eyelid_center_xy.tolist() == pytest.approx([40.0, 40.0])
     assert result.eye_size_xy.tolist() == pytest.approx([40.0, 40.0])
     assert result.eye_pose_2d.tolist() == pytest.approx([0.125, -0.125])
@@ -228,12 +225,63 @@ def test_eye_roi_is_still_created_when_all_optional_features_are_disabled() -> N
     assert result.eyelid_direction_angles_normalized is None
 
 
-def test_selected_eye_ear_is_independent_of_face_side() -> None:
-    points = _eyelid_points()
-    reversed_points = points[[3, 4, 5, 0, 1, 2]]
+def test_bbox_stretch_directly_resizes_without_black_padding() -> None:
+    image = np.full((100, 160, 3), 127, dtype=np.uint8)
+    result = preprocess_profile_side(
+        image,
+        eye_bbox_xyxy=[20, 20, 60, 60],
+        crop_mode="stretch",
+        extract_head_pose=False,
+        extract_iris_pose=False,
+        extract_eye_angles=False,
+    )
 
-    assert selected_eye_ear(points) == pytest.approx(0.3)
-    assert selected_eye_ear(reversed_points) == pytest.approx(0.3)
+    assert result.patch.shape == (128, 256, 3)
+    assert np.all(result.patch == 127)
+    np.testing.assert_allclose(
+        result.source_quad_xy,
+        [[20, 20], [59, 20], [59, 59], [20, 59]],
+    )
+
+
+def test_bbox_stretch_clips_expanded_crop_to_source_bounds() -> None:
+    image = np.full((100, 160, 3), 90, dtype=np.uint8)
+    result = preprocess_profile_side(
+        image,
+        eye_bbox_xyxy=[0, 0, 25, 20],
+        bbox_crop_scale_xy=[1.5, 1.5],
+        crop_mode="stretch",
+        extract_head_pose=False,
+        extract_iris_pose=False,
+        extract_eye_angles=False,
+    )
+
+    assert result.patch.shape == (128, 256, 3)
+    assert np.all(result.patch == 90)
+    assert result.source_quad_xy[:, 0].min() == 0
+    assert result.source_quad_xy[:, 1].min() == 0
+
+
+def test_bbox_stretch_at_exclusive_image_boundary_excludes_black_background() -> None:
+    image = np.zeros((100, 160, 3), dtype=np.uint8)
+    roi_color = np.asarray([17, 123, 231], dtype=np.uint8)
+    image[90:100, 140:160] = roi_color
+
+    result = preprocess_profile_side(
+        image,
+        eye_bbox_xyxy=[140, 90, 160, 100],
+        crop_mode="stretch",
+        extract_head_pose=False,
+        extract_iris_pose=False,
+        extract_eye_angles=False,
+    )
+
+    assert result.patch.shape == (128, 256, 3)
+    assert np.all(result.patch == roi_color)
+    np.testing.assert_allclose(
+        result.source_quad_xy,
+        [[140, 90], [159, 90], [159, 99], [140, 99]],
+    )
 
 
 @pytest.mark.parametrize(
