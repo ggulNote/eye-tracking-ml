@@ -83,6 +83,69 @@ def build_parser() -> argparse.ArgumentParser:
         help="평가할 split (기본값: test)",
     )
     evaluate_parser.set_defaults(handler=_run_evaluate)
+
+    demo_parser = subparsers.add_parser(
+        "demo",
+        help="83.1% pairwise 모델로 듀얼 카메라 실시간 시연을 실행합니다.",
+    )
+    demo_parser.add_argument(
+        "--assets-dir",
+        type=Path,
+        default=Path("models/demo"),
+        help="demo-models.zip을 푼 모델 폴더 (기본값: models/demo)",
+    )
+    demo_parser.add_argument(
+        "--front-camera",
+        default="0",
+        help="정면 카메라 장치 번호 또는 OpenCV URL (기본값: 0)",
+    )
+    demo_parser.add_argument(
+        "--side-camera",
+        default="1",
+        help="측면 폰카메라 장치 번호 또는 OpenCV URL (기본값: 1)",
+    )
+    demo_parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="추론 장치 (기본값: auto)",
+    )
+    demo_parser.add_argument("--camera-width", type=int, default=1280)
+    demo_parser.add_argument("--camera-height", type=int, default=720)
+    demo_parser.add_argument("--camera-fps", type=float, default=30.0)
+    demo_parser.add_argument("--screen-width", type=int, default=None)
+    demo_parser.add_argument("--screen-height", type=int, default=None)
+    demo_parser.add_argument(
+        "--windowed",
+        action="store_true",
+        help="전체 화면 대신 지정 화면 크기의 창으로 실행합니다.",
+    )
+    demo_parser.add_argument("--mirror-front", action="store_true")
+    demo_parser.add_argument("--mirror-side", action="store_true")
+    demo_parser.add_argument(
+        "--side-rotate",
+        type=int,
+        choices=(0, 90, 180, 270),
+        default=0,
+        help="측면 영상 시계방향 회전 각도",
+    )
+    demo_parser.add_argument(
+        "--smoothing",
+        type=float,
+        default=0.22,
+        help="시선 원 EMA 반응도: 0보다 크고 1 이하 (기본값: 0.22)",
+    )
+    demo_parser.add_argument(
+        "--show-cameras",
+        action="store_true",
+        help="시연 창 오른쪽 위에 두 카메라 미리보기를 표시합니다.",
+    )
+    demo_parser.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="모델 파일과 체크포인트 로딩만 검사하고 카메라는 열지 않습니다.",
+    )
+    demo_parser.set_defaults(handler=_run_demo)
     return parser
 
 
@@ -237,6 +300,44 @@ def _run_evaluate(args: argparse.Namespace) -> int:
         raise CommandError(f"평가에 실패했습니다: {exc}") from exc
     print(f"{args.split} 평가가 완료되었습니다.")
     _print_pipeline_result(result)
+    return 0
+
+
+def _run_demo(args: argparse.Namespace) -> int:
+    try:
+        from gaze_pipeline.live_demo import (
+            LiveDemoError,
+            LiveDemoOptions,
+            parse_camera_source,
+            run_live_demo,
+        )
+    except ImportError as exc:
+        raise CommandError(f"실시간 시연 의존성을 불러오지 못했습니다: {exc}") from exc
+    try:
+        run_live_demo(
+            LiveDemoOptions(
+                assets_dir=args.assets_dir,
+                front_source=parse_camera_source(args.front_camera),
+                side_source=parse_camera_source(args.side_camera),
+                device=args.device,
+                camera_width=args.camera_width,
+                camera_height=args.camera_height,
+                camera_fps=args.camera_fps,
+                screen_width=args.screen_width,
+                screen_height=args.screen_height,
+                windowed=args.windowed,
+                mirror_front=args.mirror_front,
+                mirror_side=args.mirror_side,
+                side_rotate=args.side_rotate,
+                smoothing=args.smoothing,
+                show_cameras=args.show_cameras,
+                verify_only=args.verify_only,
+            )
+        )
+    except LiveDemoError as exc:
+        raise CommandError(f"실시간 시연에 실패했습니다: {exc}") from exc
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CommandError(f"실시간 시연 초기화에 실패했습니다: {exc}") from exc
     return 0
 
 

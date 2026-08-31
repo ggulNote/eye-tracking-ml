@@ -1,0 +1,8 @@
+# Portable live demo dependencies for CPython 3.12.x.
+torch==2.13.0
+keras==3.15.1
+numpy==2.5.1
+Pillow==12.3.0
+opencv-contrib-python==4.13.0.92
+mediapipe==0.10.35
+PyYAML==6.0.3

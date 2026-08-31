@@ -126,6 +126,89 @@ powershell -ExecutionPolicy Bypass -File scripts\setup_windows.ps1 `
 make demo-dual-train
 ```
 
+## 실시간 시연: 마우스 목표점과 시선 원
+
+`demo` 명령은 정면 웹캠과 90° 측면 폰카메라를 동시에 읽어 83.1% pairwise 모델을 실행합니다.
+시연 화면에서 청록색 십자 `MOUSE TARGET`은 마우스 위치, 빨간 원 `EYE GAZE`는 모델이 예측한
+시선 위치입니다. 학습 사진, manifest와 MLflow DB는 시연 PC에 복사할 필요가 없습니다.
+
+### 이 컴퓨터에서 이동용 모델 ZIP 만들기
+
+모델 파일은 `.gitignore` 대상이므로 Git에 포함되지 않습니다. 다음 명령은 검증된 체크포인트의
+SHA-256을 확인한 뒤 현재 실행용 `models/demo`와 이동용 `release/live-demo-models.zip`을 만듭니다.
+
+```powershell
+.venv\Scripts\python.exe scripts\build_live_demo_bundle.py
+```
+
+`live-demo-models.zip`에는 다음 파일만 들어갑니다.
+
+- 83.1% pairwise pipeline checkpoint
+- 공식 BlazeGaze Front 기본 모델
+- 정면/측면 얼굴 검출용 MediaPipe 모델
+- 측면 90° 얼굴 fallback용 YuNet 모델
+- 파일별 SHA-256 manifest
+
+### 다른 Windows 컴퓨터에서 실행하기
+
+1. 다른 컴퓨터에 **64-bit Python 3.12**와 Git을 설치합니다.
+2. 코드를 clone합니다.
+
+   ```powershell
+   git clone https://github.com/ggulNote/eye-tracking-ml.git
+   cd eye-tracking-ml
+   ```
+
+3. 이 컴퓨터에서 만든 `live-demo-models.zip`을 저장소 최상위 폴더에 복사합니다.
+4. ZIP을 풀었을 때 `models\demo\best_weights.pt`가 되도록 압축을 해제합니다. ZIP 안에 이미
+   `models/demo` 폴더가 들어 있으므로 저장소 최상위에서 그대로 풀면 됩니다.
+5. 인터넷이 연결된 상태에서 환경 설치 파일을 한 번 실행합니다.
+
+   ```powershell
+   .\setup_demo_windows.bat
+   ```
+
+6. 카메라를 열지 않고 모델 파일·체크포인트·CPU 로딩을 먼저 확인합니다.
+
+   ```powershell
+   .\verify_demo_windows.bat
+   ```
+
+7. 정면 웹캠과 측면 폰카메라를 연결한 뒤 시연을 실행합니다.
+
+   ```powershell
+   .\run_demo_windows.bat
+   ```
+
+Windows에서 폰카메라가 일반 웹캠 장치로 보여야 합니다. DroidCam, Camo 같은 virtual webcam을
+사용하거나 OpenCV가 읽을 수 있는 RTSP 주소를 `--side-camera`에 전달할 수 있습니다. 카메라 번호가
+다르면 다음처럼 지정합니다.
+
+```powershell
+.venv\Scripts\python.exe -m gaze_pipeline demo `
+  --front-camera 1 --side-camera 2 --show-cameras
+```
+
+폰 영상이 세로 또는 뒤집힌 방향이면 `--side-rotate 90`, `180`, `270`을 추가합니다. 거울처럼
+반전된 장치는 `--mirror-front` 또는 `--mirror-side`를 사용합니다. GPU가 없는 PC는 자동으로 CPU를
+사용하며 속도만 느려질 수 있습니다.
+
+시연 조작키는 다음과 같습니다.
+
+| 입력 | 동작 |
+|---|---|
+| 마우스 이동 | 보고자 하는 목표점 이동 |
+| `Space` | 현재 마우스 목표점과 최근 시선 예측으로 보정 표본 추가 |
+| `C` | 보정 초기화 |
+| `R` | 시선 원 smoothing 초기화 |
+| `V` | 두 카메라 미리보기 표시/숨김 |
+| `Q` 또는 `Esc` | 종료 |
+
+보정은 화면의 좌상·우상·좌하·우하·중앙처럼 서로 일직선이 아닌 지점을 보면서 각 지점에서
+`Space`를 누릅니다. 최소 3점부터 affine 보정이 적용되며 5~9점을 권장합니다. Pairwise test는
+학습에 참여한 11명의 다른 촬영 pair를 평가한 결과이므로, 새로운 사람이나 카메라 위치·조명이 크게
+달라진 환경에서는 83.1%가 그대로 재현된다는 의미가 아닙니다.
+
 ## 전체 학습 파이프라인
 
 ### 1. 데이터 감사와 manifest 생성
@@ -243,6 +326,14 @@ checkpoint SHA-256과 artifact를 확인할 수 있습니다. 이 주소는 로�
 2026-08-25까지 로컬 MLflow에서 `FINISHED` 상태와 checkpoint lineage를 확인한 실행입니다.
 학습 데이터·weight·MLflow DB 자체는 개인정보와 용량 문제로 Git에 포함하지 않고 run ID와
 요약만 기록합니다.
+
+실시간 시연에 사용하는 pairwise 실행은 train/test에 동일한 11명의 서로 다른 pair가 포함됩니다.
+Best checkpoint SHA-256은
+`127ca3014d9ef27cdabc327b0145e2c66a1741642bb278fb41a432156a24225f`입니다.
+
+| 모델 | Train run ID | Best epoch | Validation 3×3 | Test run ID | Test 3×3 |
+|---|---|---:|---:|---|---:|
+| Pairwise Dual-view + BlazeGaze Side | `8fcf7781bf534120befe6f385f4ee386` | `45` | `83.92%` | `579b79b77cc145fba234f53fa685306b` | `83.14%` |
 
 | 모델 | Lineage | Train run ID | 완료/best epoch | Best val macro 3×3 | Test run ID |
 |---|---:|---|---:|---:|---|
