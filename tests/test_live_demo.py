@@ -7,10 +7,33 @@ from gaze_pipeline.cli import build_parser
 from gaze_pipeline.live_demo import (
     AffineCalibration,
     LiveDemoError,
+    _crop_side_eye_roi,
+    _square_bbox_xywh,
     normalized_to_pixel,
     parse_camera_source,
     pixel_to_normalized,
 )
+
+
+def test_side_eye_bbox_is_squared_around_selected_eye() -> None:
+    assert _square_bbox_xywh((10, 20, 40, 20), (100, 100)) == (10, 10, 40, 40)
+
+
+def test_side_eye_bbox_is_clipped_to_frame() -> None:
+    assert _square_bbox_xywh((-5, -5, 20, 20), (60, 80)) == (0, 0, 20, 20)
+    with pytest.raises(LiveDemoError, match="8x8"):
+        _square_bbox_xywh((2, 3, 4, 5), (60, 80))
+
+
+def test_side_eye_crop_matches_precomputed_roi_shape() -> None:
+    frame = np.zeros((60, 80, 3), dtype=np.uint8)
+    frame[10:30, 20:40] = (10, 20, 30)
+
+    roi = _crop_side_eye_roi(frame, (20, 10, 20, 20))
+
+    assert roi.shape == (128, 128, 3)
+    assert roi.dtype == np.uint8
+    assert roi[64, 64].tolist() == [10, 20, 30]
 
 
 def test_centered_normalized_pixel_round_trip() -> None:

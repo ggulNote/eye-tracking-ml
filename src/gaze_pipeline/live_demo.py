@@ -14,7 +14,6 @@ from typing import Any
 import numpy as np
 import torch
 
-from gaze_pipeline.data.side_annotation import annotation_from_landmarks
 from gaze_pipeline.data.webeyetrack_compat import (
     MediaPipeFaceLandmarkerDetector,
     estimate_metric_face_origin,
@@ -27,6 +26,7 @@ from gaze_pipeline.models.webeyetrack_front import OFFICIAL_BLAZEGAZE_MPIIFACEGA
 PAIRWISE_CHECKPOINT_SHA256 = "127ca3014d9ef27cdabc327b0145e2c66a1741642bb278fb41a432156a24225f"
 DEFAULT_ASSETS_DIR = Path("models/demo")
 WINDOW_NAME = "Pairwise Eye Tracking Demo"
+SIDE_ROI_WINDOW_NAME = "Select ONE visible side eye, then press ENTER"
 
 
 class LiveDemoError(RuntimeError):
@@ -39,7 +39,6 @@ class DemoAssets:
     checkpoint: Path
     front_weights: Path
     face_landmarker: Path
-    yunet_model: Path
 
     @classmethod
     def from_directory(cls, root: str | Path) -> DemoAssets:
@@ -49,15 +48,13 @@ class DemoAssets:
             checkpoint=base / "best_weights.pt",
             front_weights=base / "blazegaze_mpiifacegaze.keras",
             face_landmarker=base / "face_landmarker.task",
-            yunet_model=base / "face_detection_yunet.onnx",
         )
 
     def validate(self) -> None:
         required = {
             "83.1% pipeline checkpoint": self.checkpoint,
             "BlazeGaze front model": self.front_weights,
-            "MediaPipe face landmarker": self.face_landmarker,
-            "YuNet side-face fallback": self.yunet_model,
+            "MediaPipe front-face landmarker": self.face_landmarker,
         }
         missing = [f"{label}: {path}" for label, path in required.items() if not path.is_file()]
         if missing:
@@ -156,7 +153,7 @@ class AffineCalibration:
 
 
 class LiveFramePreprocessor:
-    """Create the exact Front tensor and a close live Side ROI approximation."""
+    """Create the Front tensor and the trained precomputed-Side-ROI contract."""
 
     def __init__(self, assets: DemoAssets) -> None:
         detector_config = {
@@ -166,18 +163,20 @@ class LiveFramePreprocessor:
             "mirror_retry": True,
         }
         self.front_detector = MediaPipeFaceLandmarkerDetector(detector_config)
-        self.side_detector = MediaPipeFaceLandmarkerDetector(detector_config)
-        self.yunet = _YuNetProfileEyeDetector(assets.yunet_model)
 
     def close(self) -> None:
         self.front_detector.close()
-        self.side_detector.close()
 
-    def prepare(self, front_bgr: np.ndarray, side_bgr: np.ndarray) -> PreparedInputs:
+    def prepare(
+        self,
+        front_bgr: np.ndarray,
+        side_eye_bgr: np.ndarray,
+        *,
+        side_status: str,
+    ) -> PreparedInputs:
         import cv2  # type: ignore
 
         front_rgb = cv2.cvtColor(front_bgr, cv2.COLOR_BGR2RGB)
-        side_rgb = cv2.cvtColor(side_bgr, cv2.COLOR_BGR2RGB)
         front = self.front_detector.detect(front_rgb, "front")
         front_patch, _, _ = webeyetrack_eye_patch(
             front_rgb,
@@ -195,7 +194,12 @@ class LiveFramePreprocessor:
             max_iterations=10,
             max_depth_step_cm=5.0,
         )
-        side_roi, side_status = self._side_roi(side_rgb)
+        side_roi = cv2.cvtColor(side_eye_bgr, cv2.COLOR_BGR2RGB)
+        if side_roi.shape != (128, 128, 3):
+            raise LiveDemoError(
+                "측면 한쪽 눈 ROI는 128x128 RGB 입력이어야 합니다: "
+                f"shape={side_roi.shape}"
+            )
         side_canvas = np.zeros((128, 256, 3), dtype=np.uint8)
         side_canvas[:, 64:192] = side_roi
         return PreparedInputs(
@@ -206,42 +210,45 @@ class LiveFramePreprocessor:
             side_status=side_status,
         )
 
-    def _side_roi(self, side_rgb: np.ndarray) -> tuple[np.ndarray, str]:
-        import cv2  # type: ignore
 
+class SideEyeRoiTracker:
+    """Track one manually selected profile-eye ROI without full-face landmarks."""
+
+    def __init__(self) -> None:
+        self._tracker: Any | None = None
+        self.bbox_xywh: tuple[int, int, int, int] | None = None
+        self.algorithm = ""
+
+    def select(self, frame_bgr: np.ndarray, bbox_xywh: Any) -> tuple[int, int, int, int]:
+        bbox = _square_bbox_xywh(bbox_xywh, frame_bgr.shape[:2])
+        tracker, algorithm = _create_opencv_tracker()
+        initialized = tracker.init(frame_bgr, tuple(bbox))
+        if initialized is False:
+            raise LiveDemoError("선택한 측면 눈 영역으로 tracker를 초기화하지 못했습니다.")
+        self._tracker = tracker
+        self.bbox_xywh = bbox
+        self.algorithm = algorithm
+        return bbox
+
+    def update(self, frame_bgr: np.ndarray) -> tuple[np.ndarray, str]:
+        if self._tracker is None or self.bbox_xywh is None:
+            raise LiveDemoError("측면 한쪽 눈 ROI가 없습니다. S를 눌러 눈 하나를 선택하세요.")
+        ok, tracked_bbox = self._tracker.update(frame_bgr)
+        if not ok:
+            self._tracker = None
+            self.bbox_xywh = None
+            raise LiveDemoError("측면 눈 추적을 잃었습니다. S를 눌러 한쪽 눈을 다시 선택하세요.")
         try:
-            detected = self.side_detector.detect(side_rgb, "side")
-            annotation = annotation_from_landmarks(
-                np.asarray(detected["landmarks_xy"]),
-                image_size_hw=side_rgb.shape[:2],
-                presence=np.asarray(detected["landmark_presence"]),
-                visibility=np.asarray(detected["landmark_visibility"]),
-                min_auto_confidence=0.0,
-                min_visibility_dominance=1.0,
-                min_retained_bbox_ratio=0.70,
-            )
-            bbox = annotation.bbox_xyxy
-            status = f"MediaPipe {annotation.visible_eye} eye"
-        except Exception as mediapipe_error:
-            try:
-                bbox, direction = self.yunet.detect(side_rgb)
-                status = f"YuNet {direction} eye fallback"
-            except Exception as yunet_error:
-                raise LiveDemoError(
-                    "측면 눈을 찾지 못했습니다. 폰카메라에서 얼굴 옆면과 눈이 보이게 해주세요. "
-                    f"MediaPipe={mediapipe_error}; YuNet={yunet_error}"
-                ) from yunet_error
-
-        height, width = side_rgb.shape[:2]
-        x0 = max(0, min(width - 1, int(np.floor(bbox[0]))))
-        y0 = max(0, min(height - 1, int(np.floor(bbox[1]))))
-        x1 = max(x0 + 1, min(width, int(np.ceil(bbox[2]))))
-        y1 = max(y0 + 1, min(height, int(np.ceil(bbox[3]))))
-        crop = side_rgb[y0:y1, x0:x1]
-        if crop.size == 0:
-            raise LiveDemoError("측면 눈 crop이 비어 있습니다.")
-        roi = cv2.resize(crop, (128, 128), interpolation=cv2.INTER_LINEAR)
-        return np.ascontiguousarray(roi), status
+            bbox = _square_bbox_xywh(tracked_bbox, frame_bgr.shape[:2])
+        except LiveDemoError as exc:
+            self._tracker = None
+            self.bbox_xywh = None
+            raise LiveDemoError(
+                "측면 눈 추적 영역이 화면을 벗어났습니다. S를 눌러 다시 선택하세요."
+            ) from exc
+        self.bbox_xywh = bbox
+        roi = _crop_side_eye_roi(frame_bgr, bbox)
+        return roi, f"SIDE ONE-EYE ROI · {self.algorithm} tracking"
 
 
 class LiveGazeModel:
@@ -386,6 +393,7 @@ def run_live_demo(options: LiveDemoOptions) -> None:
     fps = 0.0
 
     preprocessor = LiveFramePreprocessor(assets)
+    side_tracker = SideEyeRoiTracker()
     cameras: DualCameraCapture | None = None
     try:
         cameras = DualCameraCapture(
@@ -395,6 +403,19 @@ def run_live_demo(options: LiveDemoOptions) -> None:
             height=options.camera_height,
             fps=options.camera_fps,
         )
+        initial_front, initial_side = cameras.read()
+        initial_front = _orient_frame(initial_front, mirror=options.mirror_front, rotate=0)
+        initial_side = _orient_frame(
+            initial_side,
+            mirror=options.mirror_side,
+            rotate=options.side_rotate,
+        )
+        del initial_front
+        print(
+            "측면 카메라에서 실제로 보이는 한쪽 눈만 사각형으로 지정한 뒤 "
+            "ENTER/SPACE를 누르세요."
+        )
+        _select_side_eye_interactively(side_tracker, initial_side, required=True)
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
         if options.windowed:
             cv2.resizeWindow(WINDOW_NAME, width, height)
@@ -415,7 +436,12 @@ def run_live_demo(options: LiveDemoOptions) -> None:
                 rotate=options.side_rotate,
             )
             try:
-                prepared = preprocessor.prepare(front_frame, side_frame)
+                side_eye_roi, side_status = side_tracker.update(side_frame)
+                prepared = preprocessor.prepare(
+                    front_frame,
+                    side_eye_roi,
+                    side_status=side_status,
+                )
                 raw_prediction = model.predict(prepared)
                 recent_predictions.append(raw_prediction)
                 smoothed = (
@@ -445,6 +471,7 @@ def run_live_demo(options: LiveDemoOptions) -> None:
                 calibration=calibration,
                 front_frame=front_frame if show_cameras else None,
                 side_frame=side_frame if show_cameras else None,
+                side_roi_bbox=side_tracker.bbox_xywh if show_cameras else None,
             )
             cv2.imshow(WINDOW_NAME, canvas)
             key = cv2.waitKey(1) & 0xFF
@@ -457,6 +484,11 @@ def run_live_demo(options: LiveDemoOptions) -> None:
                 calibration.clear()
             elif key == ord("v"):
                 show_cameras = not show_cameras
+            elif key == ord("s"):
+                if _select_side_eye_interactively(side_tracker, side_frame, required=False):
+                    calibration.clear()
+                    smoothed = None
+                    recent_predictions.clear()
             elif key == 32 and recent_predictions:
                 averaged = np.mean(np.asarray(recent_predictions), axis=0)
                 target = pixel_to_normalized(mouse_position, width, height)
@@ -630,47 +662,104 @@ def _validate_asset_manifest(manifest_path: Path, root: Path) -> None:
         _verify_sha256(candidate, expected, label=f"asset {name}")
 
 
-class _YuNetProfileEyeDetector:
-    def __init__(self, model_path: Path) -> None:
-        import cv2  # type: ignore
+def _create_opencv_tracker() -> tuple[Any, str]:
+    import cv2  # type: ignore
 
-        self.detector = cv2.FaceDetectorYN.create(
-            str(model_path), "", (320, 320), 0.55, 0.3, 5000
-        )
+    candidates = (
+        (cv2, "TrackerCSRT_create", "CSRT"),
+        (cv2, "TrackerKCF_create", "KCF"),
+        (getattr(cv2, "legacy", None), "TrackerCSRT_create", "CSRT-legacy"),
+        (getattr(cv2, "legacy", None), "TrackerKCF_create", "KCF-legacy"),
+        (cv2, "TrackerMIL_create", "MIL"),
+    )
+    errors: list[str] = []
+    for namespace, factory_name, label in candidates:
+        factory = None if namespace is None else getattr(namespace, factory_name, None)
+        if not callable(factory):
+            continue
+        try:
+            return factory(), label
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+    detail = "; ".join(errors) if errors else "tracker factory가 설치되어 있지 않음"
+    raise LiveDemoError(
+        "측면 눈 tracker를 만들 수 없습니다. opencv-contrib-python 설치를 확인하세요: "
+        + detail
+    )
 
-    def detect(self, rgb: np.ndarray) -> tuple[tuple[float, float, float, float], str]:
-        import cv2  # type: ignore
 
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        height, width = bgr.shape[:2]
-        self.detector.setInputSize((width, height))
-        _, faces = self.detector.detect(bgr)
-        if faces is None or len(faces) == 0:
-            raise LiveDemoError("YuNet face detector found no face")
-        face = max(faces, key=lambda row: float(row[2] * row[3]) * max(float(row[14]), 0.0))
-        x, y, face_width, face_height = (float(value) for value in face[:4])
-        if face_width <= 0 or face_height <= 0:
-            raise LiveDemoError("YuNet face bbox is invalid")
-        first_eye = np.asarray(face[4:6], dtype=np.float64)
-        second_eye = np.asarray(face[6:8], dtype=np.float64)
-        nose_x = float(face[8])
-        looking_left = nose_x < float((first_eye[0] + second_eye[0]) / 2.0)
-        eye = min((first_eye, second_eye), key=lambda point: point[0])
-        visible_eye = "right"
-        if not looking_left:
-            eye = max((first_eye, second_eye), key=lambda point: point[0])
-            visible_eye = "left"
-        crop_width = max(12.0, face_width * 0.24)
-        crop_height = crop_width / 2.0
-        return (
-            (
-                float(eye[0] - crop_width / 2.0),
-                float(eye[1] - crop_height / 2.0),
-                float(eye[0] + crop_width / 2.0),
-                float(eye[1] + crop_height / 2.0),
-            ),
-            visible_eye,
-        )
+def _square_bbox_xywh(
+    bbox_xywh: Any,
+    frame_size_hw: tuple[int, int] | Any,
+) -> tuple[int, int, int, int]:
+    values = np.asarray(bbox_xywh, dtype=np.float64).reshape(-1)
+    if values.shape != (4,) or not np.isfinite(values).all():
+        raise LiveDemoError(f"측면 눈 ROI bbox가 올바르지 않습니다: {bbox_xywh!r}")
+    frame_height, frame_width = (int(frame_size_hw[0]), int(frame_size_hw[1]))
+    x, y, width, height = (float(value) for value in values)
+    if frame_height <= 0 or frame_width <= 0 or width < 8.0 or height < 8.0:
+        raise LiveDemoError("측면 눈 ROI를 최소 8x8 픽셀 이상 선택해야 합니다.")
+    side = min(max(width, height), float(frame_width), float(frame_height))
+    center_x = x + width / 2.0
+    center_y = y + height / 2.0
+    x0 = int(round(np.clip(center_x - side / 2.0, 0.0, frame_width - side)))
+    y0 = int(round(np.clip(center_y - side / 2.0, 0.0, frame_height - side)))
+    side_int = max(8, min(int(round(side)), frame_width - x0, frame_height - y0))
+    return x0, y0, side_int, side_int
+
+
+def _crop_side_eye_roi(
+    frame_bgr: np.ndarray,
+    bbox_xywh: tuple[int, int, int, int],
+) -> np.ndarray:
+    import cv2  # type: ignore
+
+    x, y, width, height = bbox_xywh
+    crop = frame_bgr[y : y + height, x : x + width]
+    if crop.size == 0:
+        raise LiveDemoError("선택한 측면 눈 ROI가 비어 있습니다.")
+    interpolation = cv2.INTER_AREA if width > 128 or height > 128 else cv2.INTER_LINEAR
+    roi = cv2.resize(crop, (128, 128), interpolation=interpolation)
+    return np.ascontiguousarray(roi)
+
+
+def _select_side_eye_interactively(
+    tracker: SideEyeRoiTracker,
+    side_frame: np.ndarray,
+    *,
+    required: bool,
+) -> bool:
+    import cv2  # type: ignore
+
+    preview = side_frame.copy()
+    cv2.putText(
+        preview,
+        "Drag a tight box around ONE visible eye - ENTER/SPACE: OK, C: cancel",
+        (18, 34),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (0, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    bbox = cv2.selectROI(
+        SIDE_ROI_WINDOW_NAME,
+        preview,
+        showCrosshair=True,
+        fromCenter=False,
+    )
+    try:
+        cv2.destroyWindow(SIDE_ROI_WINDOW_NAME)
+    except Exception:
+        pass
+    if float(bbox[2]) < 8.0 or float(bbox[3]) < 8.0:
+        if required:
+            raise LiveDemoError(
+                "측면 한쪽 눈 선택이 취소되었습니다. 데모를 다시 실행해 눈 하나를 선택하세요."
+            )
+        return False
+    tracker.select(side_frame, bbox)
+    return True
 
 
 def _open_camera(source: int | str, *, width: int, height: int, fps: float) -> Any:
@@ -740,10 +829,18 @@ def _render_canvas(
     calibration: AffineCalibration,
     front_frame: np.ndarray | None,
     side_frame: np.ndarray | None,
+    side_roi_bbox: tuple[int, int, int, int] | None,
 ) -> np.ndarray:
     import cv2  # type: ignore
 
     canvas = np.full((height, width, 3), 18, dtype=np.uint8)
+    grid_color = (52, 52, 52)
+    for column in (1, 2):
+        x = int(round(width * column / 3.0))
+        cv2.line(canvas, (x, 0), (x, height - 1), grid_color, 1, cv2.LINE_AA)
+    for row in (1, 2):
+        y = int(round(height * row / 3.0))
+        cv2.line(canvas, (0, y), (width - 1, y), grid_color, 1, cv2.LINE_AA)
     mx, my = mouse_position
     target_color = (255, 200, 40)
     cv2.circle(canvas, (mx, my), 12, target_color, 2, cv2.LINE_AA)
@@ -779,7 +876,7 @@ def _render_canvas(
         f"FPS {fps:.1f} | {'CALIBRATED' if calibrated else 'RAW MODEL'}",
         f"Status: {status}",
         "Move mouse = target | SPACE = add calibration point | C = clear calibration",
-        "V = camera preview | R = reset smoothing | Q/ESC = exit",
+        "S = reselect ONE side eye | V = camera preview | R = reset | Q/ESC = exit",
     ]
     for index, line in enumerate(lines):
         cv2.putText(
@@ -808,6 +905,27 @@ def _render_canvas(
         thumb_height = int(thumb_width * 9 / 16)
         front_thumb = cv2.resize(front_frame, (thumb_width, thumb_height))
         side_thumb = cv2.resize(side_frame, (thumb_width, thumb_height))
+        if side_roi_bbox is not None:
+            side_height, side_width = side_frame.shape[:2]
+            x, y, roi_width, roi_height = side_roi_bbox
+            scale_x = thumb_width / side_width
+            scale_y = thumb_height / side_height
+            point0 = (int(round(x * scale_x)), int(round(y * scale_y)))
+            point1 = (
+                int(round((x + roi_width) * scale_x)),
+                int(round((y + roi_height) * scale_y)),
+            )
+            cv2.rectangle(side_thumb, point0, point1, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(
+                side_thumb,
+                "ONE EYE ROI",
+                (max(2, point0[0]), max(16, point0[1] - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
         x0 = width - thumb_width - 18
         y0 = 18
         canvas[y0 : y0 + thumb_height, x0 : x0 + thumb_width] = front_thumb
@@ -823,6 +941,7 @@ __all__ = [
     "LiveDemoError",
     "LiveDemoOptions",
     "LiveGazeModel",
+    "SideEyeRoiTracker",
     "normalized_to_pixel",
     "parse_camera_source",
     "pixel_to_normalized",

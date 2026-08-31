@@ -129,8 +129,14 @@ make demo-dual-train
 ## 실시간 시연: 마우스 목표점과 시선 원
 
 `demo` 명령은 정면 웹캠과 90° 측면 폰카메라를 동시에 읽어 83.1% pairwise 모델을 실행합니다.
-시연 화면에서 청록색 십자 `MOUSE TARGET`은 마우스 위치, 빨간 원 `EYE GAZE`는 모델이 예측한
-시선 위치입니다. 학습 사진, manifest와 MLflow DB는 시연 PC에 복사할 필요가 없습니다.
+정면 카메라에는 얼굴 전체와 양쪽 눈이 보여야 하지만, 측면 카메라에는 학습 데이터와 동일하게
+카메라 쪽 **한쪽 눈만 보이면 됩니다**. 실행 직후 뜨는 선택 창에서 보이는 눈 하나만 타이트하게
+드래그하고 `Enter` 또는 `Space`를 누릅니다. 이후 CSRT/KCF tracker가 그 ROI를 따라가며, 측면
+얼굴 랜드마크나 반대쪽 눈은 사용하지 않습니다. 추적을 잃으면 `S`로 눈을 다시 선택합니다.
+
+시연 화면의 옅은 선은 평가 기준과 같은 3×3 격자입니다. 청록색 십자 `MOUSE TARGET`은 마우스
+위치, 빨간 원 `EYE GAZE`는 모델이 예측한 시선 위치입니다. 학습 사진, manifest와 MLflow DB는
+시연 PC에 복사할 필요가 없습니다.
 
 ### 이 컴퓨터에서 이동용 모델 ZIP 만들기
 
@@ -145,8 +151,7 @@ SHA-256을 확인한 뒤 현재 실행용 `models/demo`와 이동용 `release/li
 
 - 83.1% pairwise pipeline checkpoint
 - 공식 BlazeGaze Front 기본 모델
-- 정면/측면 얼굴 검출용 MediaPipe 모델
-- 측면 90° 얼굴 fallback용 YuNet 모델
+- 정면 BlazeGaze 입력 생성용 MediaPipe 모델
 - 파일별 SHA-256 manifest
 
 ### 다른 Windows 컴퓨터에서 실행하기
@@ -174,7 +179,8 @@ SHA-256을 확인한 뒤 현재 실행용 `models/demo`와 이동용 `release/li
    .\verify_demo_windows.bat
    ```
 
-7. 정면 웹캠과 측면 폰카메라를 연결한 뒤 시연을 실행합니다.
+7. 정면 웹캠과 90° 측면 폰카메라를 연결한 뒤 시연을 실행합니다. 처음 뜨는 창에서 측면에
+   보이는 한쪽 눈만 선택하고 `Enter`를 누릅니다.
 
    ```powershell
    .\run_demo_windows.bat
@@ -235,6 +241,7 @@ Intel Mac은 현재 고정 버전과 다른 legacy dependency 검증이 필요�
    ```
 
 6. Mac 내장 카메라를 정면에 두고, iPhone/외부 카메라를 얼굴의 90° 측면에 둔 뒤 실행합니다.
+   처음 뜨는 창에서 측면에 보이는 한쪽 눈만 선택하고 `Enter`를 누릅니다.
 
    ```bash
    ./run_demo_macos.sh
@@ -266,6 +273,7 @@ Apple Silicon MPS에서 환경별 연산 문제가 발생하면 CPU로 전환할
 | `Space` | 현재 마우스 목표점과 최근 시선 예측으로 보정 표본 추가 |
 | `C` | 보정 초기화 |
 | `R` | 시선 원 smoothing 초기화 |
+| `S` | 측면 한쪽 눈 ROI 재선택; 기존 보정과 smoothing 초기화 |
 | `V` | 두 카메라 미리보기 표시/숨김 |
 | `Q` 또는 `Esc` | 종료 |
 

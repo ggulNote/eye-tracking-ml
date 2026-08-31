@@ -35,11 +35,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=project_root / "models/face_landmarker_v2_with_blendshapes.task",
     )
     parser.add_argument(
-        "--yunet-model",
-        type=Path,
-        default=project_root / "models/face_detection_yunet_2023mar.onnx",
-    )
-    parser.add_argument(
         "--stage-dir",
         type=Path,
         default=project_root / "models/demo",
@@ -66,7 +61,6 @@ def build_bundle(args: argparse.Namespace) -> tuple[Path, Path]:
         "best_weights.pt": args.checkpoint.expanduser().resolve(strict=False),
         "blazegaze_mpiifacegaze.keras": args.front_weights.expanduser().resolve(strict=False),
         "face_landmarker.task": args.face_landmarker.expanduser().resolve(strict=False),
-        "face_detection_yunet.onnx": args.yunet_model.expanduser().resolve(strict=False),
     }
     missing = [str(path) for path in sources.values() if not path.is_file()]
     if missing:
