@@ -193,6 +193,71 @@ Windows에서 폰카메라가 일반 웹캠 장치로 보여야 합니다. Droid
 반전된 장치는 `--mirror-front` 또는 `--mirror-side`를 사용합니다. GPU가 없는 PC는 자동으로 CPU를
 사용하며 속도만 느려질 수 있습니다.
 
+### 다른 macOS 컴퓨터에서 실행하기
+
+현재 고정된 재현 환경은 **Apple Silicon(M1 이상), macOS 14 Sonoma 이상, native arm64 Python
+3.12**를 대상으로 합니다. PyTorch `MPS`를 자동으로 선택하며 MPS를 쓸 수 없으면 CPU를 사용합니다.
+Intel Mac은 현재 고정 버전과 다른 legacy dependency 검증이 필요하므로 이 설치 스크립트가 중단하고
+명확한 안내를 출력합니다.
+
+1. Mac에 **64-bit Python 3.12**와 Git을 설치합니다. Homebrew를 사용한다면 다음과 같습니다.
+
+   ```bash
+   brew install python@3.12 git
+   ```
+
+2. 저장소를 clone합니다.
+
+   ```bash
+   git clone https://github.com/ggulNote/eye-tracking-ml.git
+   cd eye-tracking-ml
+   ```
+
+3. `live-demo-models.zip`을 저장소 최상위 폴더로 옮기고 압축을 풉니다.
+
+   ```bash
+   unzip live-demo-models.zip -d .
+   test -f models/demo/best_weights.pt && echo "model assets OK"
+   ```
+
+4. macOS 실행 파일 권한을 확인하고 전용 환경을 설치합니다. 최초 설치에는 인터넷 연결이
+   필요합니다.
+
+   ```bash
+   chmod +x setup_demo_macos.sh verify_demo_macos.sh run_demo_macos.sh
+   ./setup_demo_macos.sh
+   ```
+
+5. 카메라를 열지 않고 모델 asset, checkpoint와 전체 smoke inference를 검사합니다.
+
+   ```bash
+   ./verify_demo_macos.sh
+   ```
+
+6. Mac 내장 카메라를 정면에 두고, iPhone/외부 카메라를 얼굴의 90° 측면에 둔 뒤 실행합니다.
+
+   ```bash
+   ./run_demo_macos.sh
+   ```
+
+첫 실행 때 macOS가 카메라 접근을 물으면 허용합니다. 영상이 나오지 않으면 **시스템 설정 →
+개인정보 보호 및 보안 → 카메라**에서 Terminal 또는 사용하는 터미널 앱을 켠 뒤 터미널을 다시
+실행합니다. iPhone은 Continuity Camera 또는 Camo 같은 virtual webcam으로 Mac의 카메라 장치에
+나타나야 합니다.
+
+장치 번호가 반대로 잡혔거나 측면 영상이 회전된 경우 실행 인자를 덮어씁니다.
+
+```bash
+./run_demo_macos.sh --front-camera 1 --side-camera 0 --side-rotate 90
+```
+
+Apple Silicon MPS에서 환경별 연산 문제가 발생하면 CPU로 전환할 수 있습니다.
+
+```bash
+./verify_demo_macos.sh --device cpu
+./run_demo_macos.sh --device cpu
+```
+
 시연 조작키는 다음과 같습니다.
 
 | 입력 | 동작 |

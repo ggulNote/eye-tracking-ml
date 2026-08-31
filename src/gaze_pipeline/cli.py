@@ -106,9 +106,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     demo_parser.add_argument(
         "--device",
-        choices=("auto", "cpu", "cuda"),
+        choices=("auto", "cpu", "cuda", "mps"),
         default="auto",
-        help="추론 장치 (기본값: auto)",
+        help="추론 장치: Apple Silicon은 mps 지원 (기본값: auto)",
     )
     demo_parser.add_argument("--camera-width", type=int, default=1280)
     demo_parser.add_argument("--camera-height", type=int, default=720)

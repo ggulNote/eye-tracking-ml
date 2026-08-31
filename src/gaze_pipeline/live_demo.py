@@ -251,6 +251,8 @@ class LiveGazeModel:
         assets.validate()
         os.environ.setdefault("KERAS_BACKEND", "torch")
         self.device = _resolve_device(device)
+        if self.device.type == "mps":
+            os.environ.setdefault("KERAS_TORCH_DEVICE", "mps")
         self.front = build_model_runtime(
             "front",
             _front_model_config(assets.front_weights),
@@ -505,12 +507,22 @@ def _image_tensor(rgb: np.ndarray) -> torch.Tensor:
 
 def _resolve_device(requested: str) -> torch.device:
     normalized = str(requested).strip().lower()
+    mps_available = bool(
+        hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+    )
     if normalized == "auto":
-        normalized = "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            normalized = "cuda"
+        elif mps_available:
+            normalized = "mps"
+        else:
+            normalized = "cpu"
     if normalized == "cuda" and not torch.cuda.is_available():
         raise LiveDemoError("CUDA를 요청했지만 사용 가능한 NVIDIA CUDA 장치가 없습니다.")
-    if normalized not in {"cpu", "cuda"}:
-        raise LiveDemoError("device는 auto, cpu, cuda 중 하나여야 합니다.")
+    if normalized == "mps" and not mps_available:
+        raise LiveDemoError("MPS를 요청했지만 사용 가능한 Apple Silicon MPS 장치가 없습니다.")
+    if normalized not in {"cpu", "cuda", "mps"}:
+        raise LiveDemoError("device는 auto, cpu, cuda, mps 중 하나여야 합니다.")
     return torch.device(normalized)
 
 

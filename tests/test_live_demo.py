@@ -77,3 +77,9 @@ def test_demo_cli_parses_portable_options() -> None:
     assert args.side_camera == "rtsp://phone/live"
     assert args.side_rotate == 90
     assert args.verify_only is True
+
+
+def test_demo_cli_accepts_apple_silicon_mps() -> None:
+    args = build_parser().parse_args(["demo", "--device", "mps", "--verify-only"])
+
+    assert args.device == "mps"
