@@ -172,11 +172,20 @@ def test_forged_path_traversal_identity_is_rejected(tmp_path: Path) -> None:
         cache.entry_paths(forged)
 
 
+def _symlink_or_skip(link: Path, target: Path, *, target_is_directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
+
+
 def test_symlink_cache_root_and_shard_are_rejected(tmp_path: Path) -> None:
     real_root = tmp_path / "real"
     real_root.mkdir()
     linked_root = tmp_path / "linked"
-    linked_root.symlink_to(real_root, target_is_directory=True)
+    _symlink_or_skip(linked_root, real_root, target_is_directory=True)
     with pytest.raises(PreprocessingCacheSecurityError, match="non-symlink directory"):
         TrustedLocalPreprocessingCache(linked_root, {}, trusted_local=True)
 
@@ -187,7 +196,7 @@ def test_symlink_cache_root_and_shard_are_rejected(tmp_path: Path) -> None:
     paths.shard.parent.mkdir(parents=True)
     external = tmp_path / "external.pkl"
     external.write_bytes(b"external")
-    paths.shard.symlink_to(external)
+    _symlink_or_skip(paths.shard, external)
     paths.checksum.write_text("0" * 64 + "\n", encoding="ascii")
 
     with pytest.raises(PreprocessingCacheSecurityError, match="non-symlink regular file"):
@@ -202,7 +211,7 @@ def test_symlink_managed_subdirectory_cannot_escape_root(tmp_path: Path) -> None
     namespace.mkdir(parents=True)
     external = tmp_path / "external-directory"
     external.mkdir()
-    paths.shard.parent.symlink_to(external, target_is_directory=True)
+    _symlink_or_skip(paths.shard.parent, external, target_is_directory=True)
 
     with pytest.raises(PreprocessingCacheSecurityError):
         cache.store(identity, {"value": 1})

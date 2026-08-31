@@ -372,6 +372,54 @@ def test_valid_zero_drops_complete_pair_before_manifest_and_pairing(tmp_path: Pa
     assert all(row["head_pose_valid"] == "true" for row in rows if row["view"] == "webcam")
 
 
+def test_precomputed_side_roi_replaces_phone_image_and_skips_missing_sessions(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "participants"
+    side_roi_root = tmp_path / "new"
+    _session(source_root, "person", "head_down")
+    _session(source_root, "person", "neutral")
+    source_side = next(
+        (source_root / "person" / "head_down" / "feature_maps" / "phone" / "frames").iterdir()
+    )
+    roi_dir = side_roi_root / "person" / "head_down" / "side_eye_roi"
+    roi_dir.mkdir(parents=True)
+    Image.new("RGB", (128, 128), color=(12, 34, 56)).save(roi_dir / source_side.name)
+    manifest = tmp_path / "generated" / "manifest.csv"
+
+    result = create_manifest(
+        source_root,
+        manifest,
+        dataset_root=tmp_path,
+        side_roi_root=side_roi_root,
+    )
+    rows = _rows(manifest)
+
+    assert result.subjects == ("person",)
+    assert result.output_pairs == 1
+    assert result.skipped_missing_side_roi_sessions == 1
+    assert result.dropped_missing_side_roi_pairs == 0
+    assert {row["session_id"] for row in rows} == {"head_down"}
+    side = next(row for row in rows if row["view"] == "phonecam")
+    assert side["image_path"].startswith("new/person/head_down/side_eye_roi/")
+    assert side["eye_annotation_valid"] == "true"
+    assert side["visible_eye_bbox_xyxy"] == ""
+
+    records = read_generic_csv_manifest(
+        dataset_root=tmp_path,
+        data_config={
+            "views": {"source_to_branch": {"webcam": "front", "phonecam": "side"}},
+            "pairing": {"enabled": True},
+        },
+        reader_config={"manifest_path": str(manifest)},
+        base_dir=tmp_path,
+        dataset_name="precomputed-side-roi",
+    )
+    side_record = next(record for record in records if record.view == "side")
+    assert side_record.image_path == (roi_dir / source_side.name).resolve()
+    assert side_record.eye_annotation_valid is True
+
+
 @pytest.mark.parametrize("bad_value", ["nan", "inf", "not-a-number"])
 def test_valid_input_rejects_nonfinite_or_malformed_pose(tmp_path: Path, bad_value: str) -> None:
     root = tmp_path / "measured"

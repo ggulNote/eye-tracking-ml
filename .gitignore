@@ -1,5 +1,7 @@
 # Python
-.venv/
+.venv*/
+.python312/
+.tmp/
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -47,6 +49,9 @@ weights/
 *.pickle
 *.safetensors
 *.onnx
+
+# Generated release archives
+/release/*.zip
 
 # Local reference documents
 *.pdf

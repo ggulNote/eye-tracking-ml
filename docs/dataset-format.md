@@ -5,15 +5,15 @@
 ## 1. 측정 DB 원본
 
 ```text
-project_data/data/
+Participants/
 └── <subject_name>/
     └── <session>/
         └── feature_maps/
-            ├── web/
-            │   ├── frames/
-            │   └── webeyetrack/inputs.csv
-            └── phone/
-                └── frames/
+            ├── web/frames/
+            ├── phone/frames/
+            ├── webeyetrack/inputs.csv
+            ├── training.csv
+            └── evaluation.csv
 ```
 
 - `<subject_name>`은 숫자 ID가 아니어도 됩니다. builder가 Unicode를 NFC로 정규화합니다.
@@ -54,35 +54,23 @@ kim_neutral_001_side,kim,neutral,phonecam,kim/neutral/feature_maps/phone/frames/
 | `face_origin` | 카메라 좌표계의 3D 얼굴 위치. manifest에는 `face_origin_3d`로 기록 |
 | `valid` | upstream producer가 승인한 frame 여부. `1`이면 사용, `0`이면 pair 전체 제외 |
 
-`valid`는 이미 생성된 upstream 품질 판정입니다. 이 저장소는 로컬에서 눈 감김 지표를 다시 계산하지 않고, `valid=0`인 Front와 paired Side를 함께 제외합니다. `head_vector`와 `face_origin`은 `valid=1`이고 값이 유한할 때만 Front 보조 입력으로 사용합니다.
+`valid`는 이미 생성된 upstream 눈 상태 판정입니다. 정확히 `1`이면 눈 뜸(open), `0`이면 눈 감음(close)으로 해석합니다. 이 저장소는 로컬에서 눈 감김 지표를 다시 계산하지 않고, `valid=0`인 Front와 paired Side를 Side 검출·검수 및 학습에서 함께 제외합니다. 다른 값은 데이터 오류입니다. `head_vector`와 `face_origin`은 `valid=1`이고 값이 유한할 때만 Front 보조 입력으로 사용합니다.
 
-## 4. Side 눈 bbox annotation
+## 4. 외부 Side 눈 ROI
 
-Side ROI는 별도 CSV에서 `sample_id`로 연결합니다. 최소 열은 다음 네 개입니다.
+현재 production은 다음처럼 Front/Side ROI와 `inputs.csv`를 한 session 폴더에서 읽습니다.
 
-```csv
-sample_id,visible_eye,visible_eye_bbox_xyxy,eye_annotation_valid
-kim_neutral_001_side,left,"[820,410,1170,590]",true
+```text
+process_data/<subject>/<head_down|neutral>/
+├── eye_roi/<pair_id>.png
+├── side_eye_roi/<원래-phone-frame-파일명>.png
+└── inputs.csv
 ```
 
-| 열 | 의미 |
-|---|---|
-| `sample_id` | Side manifest row와 같은 ID |
-| `visible_eye` | 보이는 눈: `left` 또는 `right` |
-| `visible_eye_bbox_xyxy` | 원본 phone frame 기준 `[x1,y1,x2,y2]` |
-| `eye_annotation_valid` | 실제 frame에서 검수된 bbox인지 여부 |
-
-현재 production 설정은 bbox를 frame 경계에서 자른 뒤 `128×256`으로 직접 resize하는 `stretch` 방식입니다. 사람마다 bbox 크기가 달라도 최종 tensor는 `[3,128,256]`이며, 검은 padding을 넣지 않고 종횡비도 유지하지 않습니다.
-
-선택 feature를 사용할 때만 다음 열을 추가합니다.
-
-| 열 | model feature |
-|---|---|
-| `profile_head_origin_xy`, `profile_head_forward_xy` | `side_head_pose_2d` |
-| `visible_eye_keypoints_xy` 6점 | `side_eye_angles` |
-| `iris_center_xy` | `side_iris_pose_2d` |
-
-고정 bbox나 더미 좌표를 여러 사람에게 복제한 row에는 `eye_annotation_valid=true`를 사용하면 안 됩니다. 현재 파이프라인은 annotation이 없는 phone frame에서 눈을 자동 검출하지 않습니다.
+Front는 `inputs.csv.eye_patch_path`, Side는 `pair_id`가 포함된 원본 phone frame basename으로
+연결합니다. Front `128×512`는 resize 없이 그대로 사용합니다. Side는 `128×128`보다 큰 축은 중앙
+crop, 작은 축은 검정 padding한 뒤 `128×256` 검정 canvas 중앙에 배치합니다. `inputs.csv`가 없는
+session, `valid=0` pair, 완전하지 않은 pair와 품질 제외 session은 manifest에 들어가지 않습니다.
 
 ## 5. Pair와 subject-wise split
 
@@ -105,19 +93,51 @@ y_norm = target_y_px / screen_height_px - 0.5
 
 화면 중심은 `(0,0)`이고 target 범위는 보통 `[-0.5,0.5]`입니다. 카메라 이미지 크기를 분모로 사용하지 않습니다.
 
-## 7. 측정 DB 준비와 확인
+## 7. Legacy Side bbox 자동 생성·검수
+
+아래 절차는 외부 `side_eye_roi` 이미지가 없을 때만 사용하는 이전 방식입니다. 현재 production
+학습 경로에서는 실행하지 않습니다.
+
+```bash
+make measured-side-annotations \
+  MEASURED_DATA_ROOT="/absolute/path/to/Participants"
+```
+
+MediaPipe Face Landmarker가 보이는 눈을 선택하고 눈꺼풀·iris landmark로 bbox를 생성합니다. 측면
+얼굴에서 MediaPipe가 실패하면 OpenCV Zoo YuNet의 얼굴·눈 후보를 사용하고, 같은 촬영 session의
+신뢰 가능한 앞뒤 bbox가 있으면 시간축 보간으로 보완합니다. 눈 크기, 눈 뜬 높이, 좌우 눈 가시성
+차이, landmark 신뢰도, bbox 경계, 선명도와 종합 자동검출 신뢰도를 검사하며 자동 승인되지 않은
+row는 `side_annotations_review_queue.csv`와 `review_queue_*.jpg`로 보냅니다. Haar fallback은 좌표
+후보만 만들고 기본적으로 자동 승인하지 않습니다.
+
+contact sheet의 초록색 `ACCEPT` 박스만 자동 승인된 학습 후보입니다. 빨간색
+`REVIEW-NOT-USED` 박스는 귀나 머리카락에 잘못 놓일 수 있는 저신뢰 후보이며, 검수 전에는 manifest와
+학습에 들어가지 않습니다.
+
+검수 CSV에서 bbox와 `visible_eye`를 확인하고 `eye_annotation_valid=true`로 바꾼 뒤 병합합니다.
+
+```bash
+make measured-side-annotations \
+  MEASURED_DATA_ROOT="/absolute/path/to/Participants" \
+  SIDE_REVIEW_OVERRIDES="/absolute/path/to/edited_review_queue.csv"
+```
+
+빈 bbox나 더미 좌표를 강제로 유효 처리하지 않으며, 최종적으로 모든 row가 승인되어야
+`measured-manifest`가 통과합니다.
+
+## 8. 측정 DB 준비와 확인
 
 ```bash
 make measured-manifest \
-  MEASURED_DATA_ROOT="/absolute/path/to/project_data/data" \
+  MEASURED_DATA_ROOT="/absolute/path/to/Participants" \
   SIDE_ANNOTATIONS="/absolute/path/to/side_annotations.csv"
 
 make measured-prepare \
-  MEASURED_DATA_ROOT="/absolute/path/to/project_data/data" \
+  MEASURED_DATA_ROOT="/absolute/path/to/Participants" \
   SIDE_ANNOTATIONS="/absolute/path/to/side_annotations.csv"
 
 make measured-preview \
-  MEASURED_DATA_ROOT="/absolute/path/to/project_data/data" \
+  MEASURED_DATA_ROOT="/absolute/path/to/Participants" \
   SIDE_ANNOTATIONS="/absolute/path/to/side_annotations.csv"
 ```
 

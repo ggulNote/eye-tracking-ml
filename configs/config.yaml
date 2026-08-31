@@ -18,8 +18,8 @@ experiment:
     data_unit: image
 
 paths:
-  # 개인 절대경로는 저장하지 않고 환경 변수로 입력합니다.
-  data_root: "${oc.env:GAZE_DATA_ROOT,./data/dual_view}"
+  # Participants 폴더 자체를 데이터 루트로 사용합니다. 다른 위치라면 환경 변수로 덮어씁니다.
+  data_root: "${oc.env:GAZE_DATA_ROOT,./Participants}"
   output_root: "${oc.env:GAZE_OUTPUT_ROOT,./outputs}"
   run_dir: "${paths.output_root}/${experiment.name}/${experiment.run_name}"
   checkpoint_dir: "${paths.run_dir}/checkpoints"
@@ -72,9 +72,8 @@ data:
     target_bounds_policy: error
 
   selection:
-    # null은 전체 session을 사용합니다. 특정 head pose만 쓸 때 list로 지정합니다.
-    # 예: [head_down, neutral]
-    session_ids: null
+    # 각 피험자의 head_down·neutral session만 학습에 사용합니다.
+    session_ids: [head_down, neutral]
 
   # webcam은 정면, phonecam은 90도 측면 branch로 연결합니다.
   views:
@@ -119,6 +118,8 @@ data:
   dataloader:
     # batch 크기와 병렬 이미지 로딩 설정입니다.
     batch_size: 32
+    # train에서만 원본 sample당 생성할 서로 다른 on-the-fly 증강 variant 수입니다.
+    train_repeat_factor: 1
     num_workers: 4
     pin_memory: true
     persistent_workers: true
@@ -353,7 +354,7 @@ fusion:
 
 training:
   # train 명령이 아래 반복·장치·조기 종료 설정을 사용합니다.
-  max_epochs: 100
+  max_epochs: 50
   # auto는 사용 가능한 가속기를 선택하고 devices는 장치 개수입니다.
   accelerator: auto
   devices: 1
@@ -365,8 +366,8 @@ training:
   # validation 간격은 epoch 기준입니다.
   validate_every_n_epochs: 1
   early_stopping:
-    # validation metric이 개선되지 않으면 학습을 조기 종료합니다.
-    enabled: true
+    # 40 epoch 이전 종료를 막고 요청한 50 epoch를 모두 실행합니다.
+    enabled: false
     patience_epochs: 15
     min_delta: 0.0
 

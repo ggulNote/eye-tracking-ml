@@ -1,0 +1,60 @@
+# 이미 만들어진 한쪽 눈 ROI 이미지를 Side branch 입력으로 직접 사용합니다.
+# 입력은 128x128을 기준으로 중앙 crop/pad하고, 128x256 검정 canvas 중앙에 놓습니다.
+# resize/interpolation을 사용하지 않으므로 원본 ROI 픽셀 값이 변형되지 않습니다.
+
+experiment:
+  tags:
+    side_input: precomputed_side_eye_roi
+    side_roi_content_hw: 128x128
+    side_model_input_hw: 128x256
+
+preprocessing:
+  branch_overrides:
+    side:
+      enabled: true
+      representation: precomputed_side_roi_center_crop_pad_v1
+      face_landmarks:
+        enabled: false
+      eye_selection:
+        enabled: false
+      metric_head_pose:
+        enabled: false
+      eye_region_warp:
+        enabled: true
+        method: precomputed_side_roi
+        # 입력 ROI가 이 크기보다 크면 중앙 crop, 작으면 검정색으로 중앙 padding합니다.
+        content_size_hw: [128, 128]
+        # 128x128 ROI를 가로 256 canvas의 중앙(x=64:192)에 배치합니다.
+        size_hw: [128, 256]
+        pad_rgb: [0, 0, 0]
+        on_failure: error
+        feature_extraction:
+          side_headpose:
+            enabled: false
+            source: side_2d
+          side_eyeangle:
+            enabled: false
+          side_eyelidangle:
+            enabled: false
+      face_roi:
+        enabled: false
+      background_mask:
+        enabled: false
+      resize:
+        enabled: false
+      normalize:
+        enabled: true
+        mode: zero_one
+        output_dtype: float32
+        channel_order: CHW
+
+model:
+  side:
+    input_contract:
+      forward_keys: auto
+      image_key: side_image
+      shape: [B, 3, 128, 256]
+      dtype: float32
+      color_order: RGB
+      value_range: [0.0, 1.0]
+      validity_key: side_gaze_valid

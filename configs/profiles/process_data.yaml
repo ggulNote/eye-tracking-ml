@@ -1,0 +1,152 @@
+# process_data/<subject>/<head_down|neutral>/{eye_roi,side_eye_roi,inputs.csv} 전용 설정입니다.
+
+experiment:
+  name: process_data_dual_roi
+  description: "사전 생성된 Front/Side eye ROI와 inputs.csv를 이용한 dual-view 학습"
+  tags:
+    dataset: process_data
+    validity_source: inputs_csv_valid
+    target_source: inputs_csv_centered
+
+paths:
+  # 실제 데이터는 Git에 포함하지 않습니다. 환경 변수로 외부 경로를 지정하세요.
+  data_root: "${oc.env:PROCESS_DATA_ROOT,./process_data}"
+
+data:
+  dataset_name: process_data_dual_roi
+  dataset_root: "${paths.data_root}"
+  reader:
+    type: generic_csv
+    manifest_path: "${oc.env:PROCESS_DATA_MANIFEST,./data/process_data_manifest.csv}"
+    verify_image_exists: true
+    verify_image_shape: true
+    fail_on_bad_row: true
+    target_bounds_policy: error
+  selection:
+    session_ids: [head_down, neutral]
+  views:
+    available: [front, side]
+    source_to_branch:
+      front: front
+      side: side
+    directory_to_branch:
+      eye_roi: front
+      side_eye_roi: side
+  pairing:
+    enabled: true
+    unit: image
+    strategy: explicit_pair_id
+    pair_id_key: pair_id
+    require_same_subject: true
+    require_same_target: true
+    max_target_distance_normalized: 0.0
+    unpaired_policy: error
+    exclude_unpaired_from_fusion_metrics: true
+  dataloader:
+    batch_size: 8
+    num_workers: 0
+    pin_memory: false
+    persistent_workers: false
+
+# train split에만 좌우 반전과 약한 색상 변형을 적용합니다. 좌우 반전 시
+# target x와 head/face vector도 함께 반전되며 Front/Side pair는 같은 변형을 공유합니다.
+preprocessing:
+  stage_order:
+    - decode
+    - exif_orientation
+    - validate
+    - face_landmarks
+    - eye_selection
+    - metric_head_pose
+    - eye_region_warp
+    - face_roi
+    - background_mask
+    - resize
+    - augment
+    - normalize
+  augment:
+    enabled: true
+    apply_to: train_only
+    horizontal_flip_probability: 0.50
+    color_jitter:
+      enabled: true
+      brightness: 0.15
+      contrast: 0.15
+      saturation: 0.10
+      hue: 0.02
+
+# 50 epoch은 상한이며 Y축 validation 성능이 10번 연속 개선되지 않으면 종료합니다.
+training:
+  max_epochs: 50
+  early_stopping:
+    enabled: true
+    patience_epochs: 10
+    min_delta: 0.0005
+
+# 사전학습 Front와 작은 피험자 수에 맞춰 BlazeGaze profile의 1e-3보다 낮게 시작합니다.
+optimizer:
+  name: AdamW
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  betas: [0.9, 0.999]
+
+# 3x3 동일 칸 정확도가 정체되면 학습률을 절반으로 낮춥니다.
+scheduler:
+  enabled: true
+  name: ReduceLROnPlateau
+  monitor: "val/${metrics.selection_metric}"
+  mode: max
+  factor: 0.5
+  patience_epochs: 3
+  min_learning_rate: 0.000001
+
+# 이상치에는 선형으로 반응하는 Huber를 사용하고 최종 Y 좌표 오차를 2배 강조합니다.
+# Side residual은 기존 보조 loss weight 1.0을 유지해 과도한 Side 보정을 피합니다.
+loss:
+  primary:
+    name: huber_xy
+    delta: 0.05
+    axis_weights:
+      x: 1.0
+      y: 2.0
+  # 정답의 3x3 칸 밖으로 벗어난 좌표에만 경계까지의 거리를 추가로 부과합니다.
+  # 연속 좌표 Huber와 함께 사용하므로 칸 내부의 실제 시선 위치도 계속 학습합니다.
+  grid_auxiliary:
+    enabled: true
+    grid_size: [3, 3]
+    weight: 0.5
+    axis_weights:
+      x: 1.0
+      y: 1.0
+  branch_auxiliary:
+    enabled: true
+    front_weight: 0.0
+    side_weight: 1.0
+    side_mask_key: side_gaze_valid
+
+# inputs.csv에는 실제 화면 픽셀/물리 크기가 없으므로 normalized metric만 보고합니다.
+metrics:
+  # 각 피험자를 동일 비중으로 둔 3x3 동일 칸 정확도를 best checkpoint 기준으로 사용합니다.
+  selection_metric: subject_macro_same_cell_rate_3x3
+  # fallback도 클수록 좋은 정확도 metric으로 두어 checkpoint mode=max와 일치시킵니다.
+  fallback_selection_metric: same_cell_rate_3x3
+  report:
+    - euclidean_normalized_mean
+    - euclidean_normalized_median
+    - mae_x_normalized
+    - mae_y_normalized
+    - subject_macro_mae_x_normalized
+    - subject_macro_mae_y_normalized
+    - same_cell_rate_3x3
+    - same_column_rate_3x3
+    - same_row_rate_3x3
+    - subject_macro_same_cell_rate_3x3
+    - mean_cell_manhattan_distance_3x3
+    - rmse_normalized
+    - out_of_bounds_rate
+    - within_0_05_normalized_rate
+
+checkpoint:
+  save_best:
+    # 정확도 계열 metric은 클수록 좋습니다.
+    mode: max

@@ -1,0 +1,41 @@
+# process_data dual-view 실험과 동일한 조건에서 BlazeGaze Front만 학습하는 비교군입니다.
+# 모델 profile 뒤에 마지막으로 적용해야 Side Encoder와 fusion을 확실히 비활성화합니다.
+
+experiment:
+  name: process_data_front_only
+  description: "process_data BlazeGaze Front-only controlled baseline"
+  tags:
+    ablation: front_only
+    side_encoder: disabled
+
+preprocessing:
+  branch_overrides:
+    side:
+      enabled: false
+
+model:
+  side:
+    enabled: false
+
+fusion:
+  enabled: false
+
+loss:
+  # 비교 대상 dual best와 동일하게 좌표 Huber만 사용합니다.
+  grid_auxiliary:
+    enabled: false
+  branch_auxiliary:
+    enabled: false
+    front_weight: 0.0
+    side_weight: 0.0
+
+metrics:
+  selection_metric: subject_macro_mae_y_normalized
+  fallback_selection_metric: subject_macro_euclidean_normalized
+
+scheduler:
+  mode: min
+
+checkpoint:
+  save_best:
+    mode: min

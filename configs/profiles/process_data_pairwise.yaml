@@ -1,0 +1,30 @@
+# process_data를 피험자 단위가 아닌 촬영 pair 단위로 무작위 분할합니다.
+# Front/Side 두 이미지는 같은 pair_id를 공유하므로 항상 같은 split에 남습니다.
+
+experiment:
+  name: process_data_pairwise
+  description: "모든 피험자를 섞되 Front/Side pair 누수를 막는 비-subject-wise 학습"
+  tags:
+    split_unit: pair_id
+    subject_wise: false
+
+data:
+  split:
+    strategy: grouped_ratio
+    group_key: pair_id
+    ratios:
+      train: 0.70
+      validation: 0.15
+      test: 0.15
+    seed: "${experiment.seed}"
+    shuffle_groups: true
+    stratify_by: null
+    prevent_group_leakage: true
+
+# 50 epoch을 상한으로 두고 validation 정확도가 10 epoch 개선되지 않으면 종료합니다.
+training:
+  max_epochs: 50
+  early_stopping:
+    enabled: true
+    patience_epochs: 10
+    min_delta: 0.0005

@@ -14,6 +14,7 @@ from gaze_pipeline.training import (
     _Components,
     _export_model,
     _load_weights_checkpoint,
+    _masked_grid_cell_loss,
     _read_pipeline_checkpoint,
     _restore_training_checkpoint,
     _save_checkpoint,
@@ -70,7 +71,60 @@ def test_gaze_metrics_report_normalized_pixel_cm_and_subject_macro() -> None:
     assert metrics["euclidean_pixel_mean"] == pytest.approx(100.0)
     assert metrics["euclidean_cm_mean"] == pytest.approx(3.5)
     assert metrics["subject_macro_euclidean_normalized"] == pytest.approx(0.15)
+    assert metrics["subject_macro_mae_x_normalized"] == pytest.approx(0.05)
+    assert metrics["subject_macro_mae_y_normalized"] == pytest.approx(0.10)
     assert math.isfinite(metrics["p95_euclidean_cm"])
+
+
+def test_subject_macro_axis_mae_weights_subjects_equally() -> None:
+    prediction = torch.tensor([[0.0, 0.1], [0.0, 0.3], [0.0, 0.5]])
+    target = torch.zeros_like(prediction)
+
+    metrics = compute_gaze_metrics(
+        prediction,
+        target,
+        subjects=["many", "many", "few"],
+    )
+
+    assert metrics["mae_y_normalized"] == pytest.approx(0.3)
+    assert metrics["subject_macro_mae_y_normalized"] == pytest.approx(0.35)
+
+
+def test_gaze_metrics_report_three_by_three_cell_accuracy() -> None:
+    target = torch.tensor(
+        [[-0.3, -0.3], [0.0, 0.0], [0.3, 0.3], [-0.3, 0.3]]
+    )
+    prediction = torch.tensor(
+        [[-0.2, -0.2], [0.2, 0.0], [0.3, 0.0], [0.3, -0.3]]
+    )
+
+    metrics = compute_gaze_metrics(
+        prediction,
+        target,
+        subjects=["p1", "p1", "p2", "p2"],
+    )
+
+    assert metrics["same_cell_rate_3x3"] == pytest.approx(0.25)
+    assert metrics["same_column_rate_3x3"] == pytest.approx(0.5)
+    assert metrics["same_row_rate_3x3"] == pytest.approx(0.5)
+    assert metrics["subject_macro_same_cell_rate_3x3"] == pytest.approx(0.25)
+    assert metrics["mean_cell_manhattan_distance_3x3"] == pytest.approx(1.5)
+
+
+def test_grid_cell_loss_is_zero_inside_target_cell_and_penalizes_crossing() -> None:
+    target = torch.tensor([[0.0, 0.0], [0.3, -0.3]])
+    prediction = torch.tensor([[0.1, -0.1], [0.0, -0.3]], requires_grad=True)
+
+    loss = _masked_grid_cell_loss(
+        prediction,
+        target,
+        torch.tensor([True, True]),
+        {"grid_size": [3, 3]},
+    )
+
+    assert float(loss.detach()) == pytest.approx(1.0 / 24.0)
+    loss.backward()
+    assert prediction.grad is not None
 
 
 def test_gaze_metrics_support_configured_threshold_accuracy_rates() -> None:

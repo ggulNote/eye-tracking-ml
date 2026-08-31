@@ -1,6 +1,7 @@
 # Side 눈 bbox만 준비된 데이터용 image-only 전처리 override입니다.
 # config.yaml -> side_profile_90.yaml -> 이 파일 -> Side model profile 순서로 적용합니다.
 # 눈꺼풀·iris·측면 head anchor가 없어도 side_image [B,3,128,256]를 생성합니다.
+# 원본 눈 ROI의 종횡비를 유지하고 남는 영역만 검은색으로 채웁니다.
 
 experiment:
   tags:
@@ -15,9 +16,10 @@ preprocessing:
         method: profile90_annotation
         size_hw: [128, 256]
         bbox_key: visible_eye_bbox_xyxy
-        # 사람별 눈 bbox를 그대로 잘라 128x256으로 직접 resize합니다. 검은 padding은 없습니다.
-        crop_mode: stretch
+        # 사람별 눈 bbox를 종횡비 그대로 128x256 안에 맞춰 픽셀 형상 왜곡을 방지합니다.
+        crop_mode: letterbox
         bbox_scale_xy: [1.0, 1.0]
+        pad_rgb: [0, 0, 0]
         on_failure: mark_invalid
         feature_extraction:
           # 아래 입력은 annotation이 있을 때만 true로 선택합니다. side_image는 항상 생성됩니다.

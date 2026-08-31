@@ -314,3 +314,26 @@ def test_prepare_cli_keeps_manifests_when_tracking_fails(
     assert result.summary_path.is_file()
     assert all(path.is_file() for path in result.manifest_paths.values())
     assert "데이터 준비가 완료되었습니다." in capsys.readouterr().out
+
+
+def test_cli_preloads_mlflow_only_when_tracking_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported: list[str] = []
+    monkeypatch.setattr(cli.importlib, "import_module", lambda name: imported.append(name))
+
+    cli._preload_enabled_mlflow({"mlflow": {"enabled": False}})
+    assert imported == []
+
+    cli._preload_enabled_mlflow({"mlflow": {"enabled": True}})
+    assert imported == ["mlflow"]
+
+
+def test_cli_reports_missing_enabled_mlflow(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_import(name: str) -> None:
+        raise ImportError(name)
+
+    monkeypatch.setattr(cli.importlib, "import_module", fail_import)
+
+    with pytest.raises(cli.CommandError, match="MLflow 기록이 켜져 있지만"):
+        cli._preload_enabled_mlflow({"mlflow": {"enabled": True}})

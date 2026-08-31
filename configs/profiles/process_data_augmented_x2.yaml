@@ -1,0 +1,44 @@
+# process_data 원본 PNG를 변경하지 않고 train pair를 epoch당 두 번 증강하는 실험입니다.
+# 전체 profile chain의 마지막에 적용합니다. Validation/test는 반복하거나 증강하지 않습니다.
+
+experiment:
+  name: process_data_dual_roi_aug_x2
+  description: "원본 PNG 무변경, resize/JPEG 없이 train on-the-fly augmentation 2배"
+  tags:
+    augmentation_mode: on_the_fly
+    train_repeat_factor: 2
+    source_images_mutated: false
+
+data:
+  image_extensions: [.png]
+  dataloader:
+    train_repeat_factor: 2
+
+preprocessing:
+  # 증강 직전 uint8 전처리 결과만 별도 로컬 PKL shard로 재사용합니다.
+  # 증강 결과 자체와 원본 PNG는 저장하거나 덮어쓰지 않습니다.
+  cache:
+    enabled: true
+    dir: "${paths.output_root}/process_data_preprocessed_cache"
+    mode: read_write
+    format: pickle
+    schema_version: 1
+    implementation_id: ordered-gaze-preprocessor-v2
+    trusted_local: true
+    max_entry_bytes: 536870912
+
+  augment:
+    enabled: true
+    apply_to: train_only
+    horizontal_flip_probability: 0.50
+    color_jitter:
+      enabled: true
+      brightness: 0.15
+      contrast: 0.15
+      saturation: 0.10
+      hue: 0.02
+
+loss:
+  # 직전 실험에서 성능이 낮았던 3x3 경계 보조 loss는 제외하고 좌표 Huber를 유지합니다.
+  grid_auxiliary:
+    enabled: false

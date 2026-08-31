@@ -249,6 +249,7 @@ def validate_config(
     available_branches = _validate_views(data, issues)
     pairing_enabled = _validate_pairing(data, available_branches, issues)
     _validate_split(data, issues)
+    _validate_dataloader(data, issues)
 
     preprocessing = _expect_mapping(config, "preprocessing", issues)
     _validate_preprocessing(preprocessing, available_branches, issues)
@@ -716,6 +717,16 @@ def _validate_data_selection(data: Mapping[str, Any], issues: list[str]) -> None
         issues.append("data.selection.session_ids에 중복 session이 있습니다.")
 
 
+def _validate_dataloader(data: Mapping[str, Any], issues: list[str]) -> None:
+    dataloader = data.get("dataloader")
+    if not isinstance(dataloader, Mapping):
+        issues.append("data.dataloader는 YAML mapping이어야 합니다.")
+        return
+    repeat_factor = dataloader.get("train_repeat_factor", 1)
+    if isinstance(repeat_factor, bool) or not isinstance(repeat_factor, int) or repeat_factor <= 0:
+        issues.append("data.dataloader.train_repeat_factor는 양의 정수여야 합니다.")
+
+
 def _validate_views(data: Mapping[str, Any], issues: list[str]) -> set[str]:
     views = data.get("views")
     if not isinstance(views, Mapping):
@@ -1093,20 +1104,28 @@ def _validate_branch_stage_overrides(
         prerequisite="face_landmarks",
         issues=issues,
     )
-    _require_effective_stage_dependency(
-        effective,
-        stage_order,
-        branch=branch,
-        dependent="metric_head_pose",
-        prerequisite="face_landmarks",
-        issues=issues,
-    )
+    metric_head_pose = effective.get("metric_head_pose", {})
+    metric_source = str(metric_head_pose.get("source", "reconstruct")).lower()
+    if metric_source not in {"precomputed", "precomputed_only"}:
+        _require_effective_stage_dependency(
+            effective,
+            stage_order,
+            branch=branch,
+            dependent="metric_head_pose",
+            prerequisite="face_landmarks",
+            issues=issues,
+        )
     eye_region_warp = effective.get("eye_region_warp", {})
     warp_method = str(eye_region_warp.get("method", "landmark_homography")).lower()
     if warp_method not in {
         "profile90_annotation",
         "profile_annotation",
         "annotation_eye_bbox",
+        "precomputed_side_roi",
+        "precomputed_front_eye_roi",
+        "precomputed_eye_roi",
+        "direct_side_roi",
+        "direct_front_eye_roi",
     }:
         _require_effective_stage_dependency(
             effective,
@@ -1607,11 +1626,22 @@ def _validate_stage_options(
                     "profile90_annotation",
                     "profile_annotation",
                     "annotation_eye_bbox",
+                    "precomputed_side_roi",
+                    "precomputed_front_eye_roi",
+                    "precomputed_eye_roi",
+                    "direct_side_roi",
+                    "direct_front_eye_roi",
                 },
                 issues,
             )
         if "size_hw" in stage_config:
             _validate_hw(stage_config.get("size_hw"), f"{field}.size_hw", issues)
+        if "content_size_hw" in stage_config:
+            _validate_hw(
+                stage_config.get("content_size_hw"),
+                f"{field}.content_size_hw",
+                issues,
+            )
         if "face_crop_size" in stage_config:
             face_crop_size = stage_config.get("face_crop_size")
             if (
@@ -1928,9 +1958,13 @@ def _validate_side_feature_selection(
             "profile90_annotation",
             "profile_annotation",
             "annotation_eye_bbox",
+            "precomputed_side_roi",
+            "precomputed_eye_roi",
+            "direct_side_roi",
         }:
             issues.append(
-                "strict-profile side feature_extraction에는 annotation 기반 eye ROI가 필요합니다."
+                "strict-profile side feature_extraction에는 annotation 또는 precomputed eye "
+                "ROI가 필요합니다."
             )
 
     head = parsed.get("side_headpose")
@@ -2333,6 +2367,28 @@ def _validate_execution_config(config: Mapping[str, Any], issues: list[str]) -> 
                 f"(입력값: {loss_name!r})."
             )
 
+    grid_auxiliary = loss.get("grid_auxiliary")
+    if grid_auxiliary is not None:
+        if not isinstance(grid_auxiliary, Mapping):
+            issues.append("loss.grid_auxiliary는 YAML mapping이어야 합니다.")
+        else:
+            if "enabled" in grid_auxiliary and not isinstance(grid_auxiliary.get("enabled"), bool):
+                issues.append("loss.grid_auxiliary.enabled는 true/false여야 합니다.")
+            grid_size = grid_auxiliary.get("grid_size", [3, 3])
+            if (
+                not isinstance(grid_size, list)
+                or len(grid_size) != 2
+                or any(
+                    isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                    for value in grid_size
+                )
+            ):
+                issues.append(
+                    "loss.grid_auxiliary.grid_size는 양의 정수 [x_bins, y_bins]여야 합니다."
+                )
+            if not _is_nonnegative_finite_number(grid_auxiliary.get("weight", 1.0)):
+                issues.append("loss.grid_auxiliary.weight는 0 이상의 유한한 수여야 합니다.")
+
     metrics = _expect_mapping(config, "metrics", issues)
     threshold_rates = metrics.get("threshold_rates", [])
     threshold_names: set[str] = set()
@@ -2370,6 +2426,13 @@ def _validate_execution_config(config: Mapping[str, Any], issues: list[str]) -> 
             "euclidean_normalized_median",
             "mae_x_normalized",
             "mae_y_normalized",
+            "subject_macro_mae_x_normalized",
+            "subject_macro_mae_y_normalized",
+            "same_cell_rate_3x3",
+            "same_column_rate_3x3",
+            "same_row_rate_3x3",
+            "subject_macro_same_cell_rate_3x3",
+            "mean_cell_manhattan_distance_3x3",
             "rmse_normalized",
             "out_of_bounds_rate",
             "subject_macro_euclidean_normalized",

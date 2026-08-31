@@ -4,13 +4,14 @@
 
 experiment:
   name: measured_head_down_neutral
-  description: "보정된 dual-view frame의 head_down·neutral subject-wise 학습"
+  description: "Front frame과 외부 precomputed Side eye ROI의 subject-wise 학습"
   tags:
     dataset: measured_named_dual_view
     selected_sessions: head_down_neutral
     split_unit: subject
-    roi_source: corrected_frames
+    roi_source: external_side_eye_roi
     pose_source: inputs_csv
+    side_roi_source: external_side_eye_roi
     sample_validity_source: inputs_csv_valid
 
 data:

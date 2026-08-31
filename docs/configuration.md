@@ -11,7 +11,7 @@
 configs/config.yaml
   → configs/profiles/blazegaze.yaml
   → configs/profiles/side_profile_90.yaml
-  → configs/profiles/side_roi_only.yaml
+  → configs/profiles/side_precomputed_roi.yaml
   → configs/profiles/measured_head_down_neutral.yaml
   → configs/models/front_webeyetrack.yaml
   → configs/models/<selected-side-model>.yaml
@@ -22,7 +22,7 @@ Production 순서를 검증하려면 다음 명령을 사용합니다.
 
 ```bash
 make validate-config \
-  PROFILES="configs/profiles/blazegaze.yaml configs/profiles/side_profile_90.yaml configs/profiles/side_roi_only.yaml configs/profiles/measured_head_down_neutral.yaml configs/models/front_webeyetrack.yaml configs/models/side_mobilenet_v4.yaml"
+  PROFILES="configs/profiles/blazegaze.yaml configs/profiles/side_profile_90.yaml configs/profiles/side_precomputed_roi.yaml configs/profiles/measured_head_down_neutral.yaml configs/models/front_webeyetrack.yaml configs/models/side_mobilenet_v4.yaml"
 ```
 
 ## 2. 주요 그룹
@@ -131,23 +131,23 @@ decode → exif_orientation → validate → face_landmarks → eye_selection
 
 ### Side ROI
 
-Production에서는 [`side_roi_only.yaml`](../configs/profiles/side_roi_only.yaml)이 다음 값을 적용합니다.
+Production에서는 [`side_precomputed_roi.yaml`](../configs/profiles/side_precomputed_roi.yaml)이
+외부 `side_eye_roi` 이미지를 직접 사용합니다.
 
 ```yaml
 preprocessing:
   branch_overrides:
     side:
       eye_region_warp:
-        method: profile90_annotation
+        method: precomputed_side_roi
+        content_size_hw: [128, 128]
         size_hw: [128, 256]
-        bbox_key: visible_eye_bbox_xyxy
-        crop_mode: stretch
-        bbox_scale_xy: [1.0, 1.0]
+        pad_rgb: [0, 0, 0]
 ```
 
-`stretch`는 각 frame의 bbox를 image 경계 안에서 자르고 바로 `128×256`으로 resize합니다. 검은
-letterbox padding은 생기지 않으며, 서로 다른 bbox 크기도 같은 tensor shape이 됩니다. 대신
-source 종횡비는 보존하지 않습니다.
+입력이 `128×128`보다 크면 중앙 crop하고 작으면 검정 padding합니다. Resize나 interpolation은
+하지 않습니다. 결과 ROI를 `128×256` canvas 중앙에 배치하므로 좌우에는 각각 64픽셀 검정 영역이
+생깁니다.
 
 ### Side 선택 feature
 
@@ -255,7 +255,7 @@ Side는 x축을 변경하지 않습니다. `learnable_weight=true`이면 residua
 
 ```yaml
 training:
-  max_epochs: 100
+  max_epochs: 50
   gradient_accumulation_steps: 1
   gradient_clip_norm: 1.0
 optimizer:

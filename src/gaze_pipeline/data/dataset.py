@@ -581,6 +581,22 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
         self.data_root = Path(data_root).expanduser()
         self.split = "validation" if split == "val" else str(split or "train")
 
+        loader_config = (
+            self.data_config.get("dataloader", {}) if isinstance(self.data_config, Mapping) else {}
+        )
+        if not isinstance(loader_config, Mapping):
+            raise ManifestError("data.dataloader must be a mapping")
+        repeat_factor = loader_config.get("train_repeat_factor", 1)
+        if (
+            isinstance(repeat_factor, bool)
+            or not isinstance(repeat_factor, int)
+            or repeat_factor <= 0
+        ):
+            raise ManifestError("data.dataloader.train_repeat_factor must be a positive integer")
+        # Validation and test must always contain one unaugmented evaluation
+        # unit per source record. Repetition is a train-only sampling policy.
+        self.train_repeat_factor = int(repeat_factor) if self.split == "train" else 1
+
         experiment_config = (
             full_config.get("experiment", {}) if isinstance(full_config, Mapping) else {}
         )
@@ -716,7 +732,24 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
         return pairs
 
     def __len__(self) -> int:
-        return len(self.records)
+        return len(self.records) * self.train_repeat_factor
+
+    def _virtual_record(self, index: int) -> tuple[Any, int]:
+        """Resolve one train-only repeated index to its source record and variant."""
+
+        length = len(self)
+        if index < 0:
+            index += length
+        if index < 0 or index >= length:
+            raise IndexError("dataset index out of range")
+        record_count = len(self.records)
+        variant_index, record_index = divmod(index, record_count)
+        return self.records[record_index], variant_index
+
+    @staticmethod
+    def _variant_identity(identity: str, variant_index: int) -> str:
+        # Keep variant zero byte-for-byte reproducible with historical runs.
+        return identity if variant_index == 0 else f"{identity}\0variant:{variant_index}"
 
     @property
     def epoch(self) -> int:
@@ -1242,10 +1275,12 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
             reasons.append(reason)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        record = self.records[index]
+        record, variant_index = self._virtual_record(index)
         if not self.paired:
             row = record
-            identity = f"sample:{_clean_string(row.get('sample_id'))}"
+            identity = self._variant_identity(
+                f"sample:{_clean_string(row.get('sample_id'))}", variant_index
+            )
             context, augmentation_seed = self._augmentation_context(
                 identity=identity, view=str(row["view"])
             )
@@ -1254,6 +1289,8 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
                 augmentation_context=context,
                 augmentation_seed=augmentation_seed,
             )
+            metadata["augmentation_variant"] = variant_index
+            metadata["augmentation_repeat_factor"] = self.train_repeat_factor
             key = "front_image" if metadata["view"] == "front" else "side_image"
             result = {
                 key: image,
@@ -1271,7 +1308,7 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
         front_row, side_row = record
         pair_id = _clean_string(front_row.get("pair_id"))
         context, augmentation_seed = self._augmentation_context(
-            identity=f"pair:{pair_id}", view="front"
+            identity=self._variant_identity(f"pair:{pair_id}", variant_index), view="front"
         )
         front_image, front_target, front_metadata = self._row_to_sample(
             front_row,
@@ -1283,6 +1320,10 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
             augmentation_context=context,
             augmentation_seed=augmentation_seed,
         )
+        front_metadata["augmentation_variant"] = variant_index
+        side_metadata["augmentation_variant"] = variant_index
+        front_metadata["augmentation_repeat_factor"] = self.train_repeat_factor
+        side_metadata["augmentation_repeat_factor"] = self.train_repeat_factor
         if not torch.allclose(front_target, side_target, atol=1e-6, rtol=0):
             raise ManifestError(
                 f"pair_id {front_metadata['pair_id']!r} produced inconsistent "
@@ -1298,6 +1339,8 @@ class GazeImageDataset(Dataset[dict[str, Any]]):
             "target_in_screen_bounds": target_in_screen_bounds,
             "augmentation_epoch": front_metadata["augmentation_epoch"],
             "augmentation_seed": front_metadata["augmentation_seed"],
+            "augmentation_variant": variant_index,
+            "augmentation_repeat_factor": self.train_repeat_factor,
             "front": front_metadata,
             "side": side_metadata,
         }

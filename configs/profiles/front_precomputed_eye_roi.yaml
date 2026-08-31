@@ -1,0 +1,51 @@
+# process_data에 이미 생성되어 있는 128x512 Front 양안 ROI를 직접 사용합니다.
+# 검출/warp/resize를 다시 하지 않으므로 기존 WebEyeTrack eye_roi 픽셀을 보존합니다.
+
+experiment:
+  tags:
+    front_input: precomputed_front_eye_roi
+    front_roi_content_hw: 128x512
+    front_model_input_hw: 128x512
+
+preprocessing:
+  branch_overrides:
+    front:
+      enabled: true
+      representation: precomputed_front_eye_roi_passthrough_v1
+      face_landmarks:
+        enabled: false
+      eye_selection:
+        enabled: false
+      metric_head_pose:
+        enabled: true
+        source: precomputed_only
+        precomputed_face_origin_unit: cm
+        on_failure: mark_invalid
+      eye_region_warp:
+        enabled: true
+        method: precomputed_front_eye_roi
+        content_size_hw: [128, 512]
+        size_hw: [128, 512]
+        pad_rgb: [0, 0, 0]
+        on_failure: error
+      face_roi:
+        enabled: false
+      background_mask:
+        enabled: false
+      resize:
+        enabled: false
+      normalize:
+        enabled: true
+        mode: zero_one
+        output_dtype: float32
+        channel_order: CHW
+
+model:
+  front:
+    input_contract:
+      image_key: front_image
+      shape: [B, 3, 128, 512]
+      dtype: float32
+      color_order: RGB
+      value_range: [0.0, 1.0]
+      validity_key: front_gaze_valid

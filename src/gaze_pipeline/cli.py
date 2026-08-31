@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -162,6 +163,7 @@ def _run_prepare(args: argparse.Namespace) -> int:
         require_model_entrypoints=False,
         base_dir=_project_base_dir(config_path),
     )
+    _preload_enabled_mlflow(config)
 
     try:
         from gaze_pipeline.data.pipeline import prepare_data
@@ -196,6 +198,7 @@ def _run_prepare(args: argparse.Namespace) -> int:
 def _run_train(args: argparse.Namespace) -> int:
     config_path = args.config.expanduser()
     config = _load_execution_config(args, config_path)
+    _preload_enabled_mlflow(config)
     try:
         from gaze_pipeline.training import TrainingError, train_pipeline
 
@@ -215,6 +218,7 @@ def _run_train(args: argparse.Namespace) -> int:
 def _run_evaluate(args: argparse.Namespace) -> int:
     config_path = args.config.expanduser()
     config = _load_execution_config(args, config_path)
+    _preload_enabled_mlflow(config)
     try:
         from gaze_pipeline.training import TrainingError, evaluate_pipeline
 
@@ -247,6 +251,28 @@ def _load_execution_config(args: argparse.Namespace, config_path: Path) -> dict[
         require_model_entrypoints=False,
         base_dir=_project_base_dir(config_path),
     )
+
+
+def _preload_enabled_mlflow(config: Mapping[str, Any]) -> None:
+    """Load MLflow before PyTorch-backed modules on Windows.
+
+    MLflow imports PyArrow while the data and training packages import
+    PyTorch.  Some Windows CUDA/PyArrow wheel combinations corrupt the native
+    heap when PyArrow is loaded after PyTorch, while the reverse order is
+    stable.  Keeping this at the CLI boundary also preserves the no-MLflow
+    dependency path when tracking is disabled.
+    """
+
+    mlflow_config = config.get("mlflow")
+    if not isinstance(mlflow_config, Mapping) or mlflow_config.get("enabled") is not True:
+        return
+    try:
+        importlib.import_module("mlflow")
+    except ImportError as exc:
+        raise CommandError(
+            "MLflow 기록이 켜져 있지만 mlflow package를 불러오지 못했습니다. "
+            "현재 가상환경에 requirements.txt를 설치하세요."
+        ) from exc
 
 
 def _print_pipeline_result(result: Any) -> None:

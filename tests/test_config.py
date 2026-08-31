@@ -28,6 +28,15 @@ FRONT_MODEL_PROFILE = PROJECT_ROOT / "configs" / "models" / "front_webeyetrack.y
         ("demo_dual_view_training.yaml",),
         ("blazegaze.yaml", "side_profile_90.yaml"),
         ("blazegaze.yaml", "side_profile_90.yaml", "side_roi_only.yaml"),
+        ("blazegaze.yaml", "side_profile_90.yaml", "side_precomputed_roi.yaml"),
+        (
+            "blazegaze.yaml",
+            "front_precomputed_eye_roi.yaml",
+            "side_profile_90.yaml",
+            "side_precomputed_roi.yaml",
+            "process_data.yaml",
+            "process_data_augmented_x2.yaml",
+        ),
     ],
 )
 def test_execution_config_validation_accepts_shipped_profiles(
@@ -105,7 +114,7 @@ def test_measured_dataset_profile_composes_with_exactly_one_side_model(
     assert measured_front["metric_head_pose"]["source"] == "precomputed_only"
     assert measured_front["metric_head_pose"]["on_failure"] == "error"
     side_warp = config["preprocessing"]["branch_overrides"]["side"]["eye_region_warp"]
-    assert side_warp["crop_mode"] == "stretch"
+    assert side_warp["crop_mode"] == "letterbox"
     assert side_warp["bbox_scale_xy"] == [1.0, 1.0]
     assert resolve_model_forward_keys(config, "side") == ("side_image",)
     assert config["preprocessing"]["cache"]["enabled"] is True

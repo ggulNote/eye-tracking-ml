@@ -56,6 +56,7 @@ from .transforms import (
     SampleValidationError,
     TransformConfigError,
     TransformDependencyError,
+    center_crop_pad_precomputed_roi,
     letterbox_resize,
     transform_points,
 )
@@ -91,6 +92,7 @@ __all__ = [
     "TransformDependencyError",
     "TrustedLocalPreprocessingCache",
     "build_dataloader",
+    "center_crop_pad_precomputed_roi",
     "deterministic_group_split",
     "ensure_unique_records",
     "gaze_collate_fn",

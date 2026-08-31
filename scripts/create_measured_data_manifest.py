@@ -3,8 +3,10 @@
 The source DB is treated as read-only.  Each selected subject/session must
 contain ``feature_maps/training.csv`` and ``feature_maps/evaluation.csv``.
 Those tables point at the lens-corrected ``web/frames`` and ``phone/frames``
-images that become the model's raw inputs.  Existing WebEyeTrack eye patches
-are deliberately never selected as ``image_path``.
+images. Front always uses the corrected web frame. With ``--side-roi-root``,
+Side instead uses ``<subject>/<session>/side_eye_roi`` images joined by the
+original phone-frame filename; missing ROI sessions are excluded. Existing
+WebEyeTrack eye patches are deliberately never selected as ``image_path``.
 
 Front metric head pose and the upstream sample-validity decision are read only from
 ``feature_maps/webeyetrack/inputs.csv``.  A row with ``valid=1`` supplies the
@@ -31,6 +33,7 @@ from typing import Any
 
 DEFAULT_SESSIONS = ("head_down", "neutral")
 MASTER_TABLES = ("training.csv", "evaluation.csv")
+SIDE_ROI_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png"})
 FRONT_INPUT_TABLE = "inputs.csv"
 FRONT_INPUT_SCHEMA = "webeyetrack_input_v1"
 MASTER_REQUIRED_COLUMNS = frozenset(
@@ -128,6 +131,8 @@ class ManifestSummary:
     source_pairs: int
     output_pairs: int
     dropped_invalid_pairs: int
+    dropped_missing_side_roi_pairs: int
+    skipped_missing_side_roi_sessions: int
     output_rows: int
     front_pose_valid_rows: int
     front_pose_missing_rows: int
@@ -153,12 +158,22 @@ class _SessionResult:
     rows: tuple[dict[str, str | int], ...]
     source_pairs: int
     dropped_invalid_pairs: int
+    dropped_missing_side_roi_pairs: int
     front_input_rows: int
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, required=True)
+    parser.add_argument(
+        "--dataset-root",
+        type=Path,
+        default=None,
+        help=(
+            "Common root containing source-root and side-roi-root. Manifest image paths are "
+            "written relative to this root. Defaults to source-root."
+        ),
+    )
     parser.add_argument("--output-manifest", type=Path, required=True)
     parser.add_argument(
         "--subjects",
@@ -187,6 +202,16 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "Optional generated Side annotation CSV keyed by sample_id. Values override the "
             "header-only feature_maps/phone/features.csv without modifying the source DB."
+        ),
+    )
+    parser.add_argument(
+        "--side-roi-root",
+        type=Path,
+        default=None,
+        help=(
+            "Optional <subject>/<session>/side_eye_roi image root. Sessions without this "
+            "directory or without images are skipped. Images are joined to phone rows by "
+            "the original phone frame filename."
         ),
     )
     parser.add_argument(
@@ -313,6 +338,41 @@ def _resolve_unicode_relative(base: Path, raw_value: str, *, source: Path, line:
     if not _is_within(resolved, base_resolved) or not resolved.is_file():
         raise MeasuredManifestError(f"{source}:{line}: referenced file does not exist: {resolved}")
     return resolved
+
+
+def _unicode_child_directory(parent: Path, name: str) -> Path | None:
+    if not parent.is_dir():
+        return None
+    normalized = _nfc(name)
+    matches = [
+        child for child in parent.iterdir() if child.is_dir() and _nfc(child.name) == normalized
+    ]
+    if len(matches) > 1:
+        raise MeasuredManifestError(
+            f"directories collide after NFC normalization under {parent}: {name!r}"
+        )
+    return matches[0] if matches else None
+
+
+def _index_side_roi_images(directory: Path) -> dict[str, Path]:
+    result: dict[str, Path] = {}
+    for image in sorted(directory.iterdir(), key=lambda path: _nfc(path.name)):
+        if not image.is_file() or image.suffix.lower() not in SIDE_ROI_IMAGE_EXTENSIONS:
+            continue
+        key = _nfc(image.name)
+        if key in result:
+            raise MeasuredManifestError(
+                f"duplicate Side ROI filename after NFC normalization: {result[key]}, {image}"
+            )
+        result[key] = image.resolve(strict=True)
+    return result
+
+
+def _manifest_image_path(image: Path, dataset_root: Path) -> str:
+    resolved = image.resolve(strict=True)
+    if not _is_within(resolved, dataset_root):
+        raise MeasuredManifestError(f"image is outside dataset-root {dataset_root}: {resolved}")
+    return resolved.relative_to(dataset_root).as_posix()
 
 
 def _required(row: Mapping[str, str], key: str, *, source: Path, line: int) -> str:
@@ -445,6 +505,15 @@ def _side_annotations(feature: _IndexedRow | None) -> dict[str, str]:
         )
     declared_valid = declared not in {"false", "0", "no"} if declared else True
     return {**values, "eye_annotation_valid": str(complete and declared_valid).lower()}
+
+
+def _precomputed_side_roi_annotations() -> dict[str, str]:
+    """Mark a complete external ROI image as usable without bbox/landmark geometry."""
+
+    return {
+        **{field: "" for field in SIDE_ANNOTATION_FIELDS},
+        "eye_annotation_valid": "true",
+    }
 
 
 def _front_input(item: _IndexedRow) -> _FrontInput:
@@ -587,8 +656,11 @@ def _session_rows(
     subject_dir: Path,
     session: str,
     *,
+    dataset_root: Path | None = None,
+    side_roi_dir: Path | None = None,
     side_annotation_index: Mapping[str, _IndexedRow] | None = None,
 ) -> _SessionResult:
+    manifest_root = dataset_root or root
     subject = _nfc(subject_dir.name)
     session_dir = subject_dir / session
     if not session_dir.is_dir():
@@ -606,11 +678,14 @@ def _session_rows(
     input_csv = feature_root / "webeyetrack" / FRONT_INPUT_TABLE
     input_rows = _read_table(input_csv, FRONT_INPUT_REQUIRED_COLUMNS)
     input_index = _index_rows(input_rows, key="sample_id")
+    side_roi_index = _index_side_roi_images(side_roi_dir) if side_roi_dir is not None else None
 
     output: list[dict[str, str | int]] = []
     seen_samples: set[str] = set()
     seen_front_inputs: set[str] = set()
     invalid_pairs: set[str] = set()
+    missing_side_roi_pairs: set[str] = set()
+    seen_side_roi_names: set[str] = set()
     for table in MASTER_TABLES:
         source = feature_root / table
         for item in _read_table(source, MASTER_REQUIRED_COLUMNS):
@@ -637,17 +712,27 @@ def _session_rows(
                 raise MeasuredManifestError(f"{source}:{line}: duplicate sample_id {sample_id!r}")
             seen_samples.add(sample_id)
 
-            image = _resolve_unicode_relative(
+            master_image = _resolve_unicode_relative(
                 feature_root,
                 _required(row, "image_path", source=source, line=line),
                 source=source,
                 line=line,
             )
             expected_frames = feature_root / ("web/frames" if view == "webcam" else "phone/frames")
-            if not _is_within(image, expected_frames.resolve(strict=True)):
+            if not _is_within(master_image, expected_frames.resolve(strict=True)):
                 raise MeasuredManifestError(
-                    f"{source}:{line}: {view} image must come from {expected_frames}, got {image}"
+                    f"{source}:{line}: {view} image must come from {expected_frames}, "
+                    f"got {master_image}"
                 )
+            image = master_image
+            if view == "phonecam" and side_roi_index is not None:
+                roi_name = _nfc(master_image.name)
+                side_roi_image = side_roi_index.get(roi_name)
+                if side_roi_image is None:
+                    missing_side_roi_pairs.add(pair_id)
+                else:
+                    image = side_roi_image
+                    seen_side_roi_names.add(roi_name)
 
             width = _positive_int(
                 row["screen_width_px"], field="screen_width_px", source=source, line=line
@@ -672,7 +757,7 @@ def _session_rows(
                         source=camera_feature.source,
                         line=camera_feature.line,
                     )
-                    if feature_image != image:
+                    if feature_image != master_image:
                         raise MeasuredManifestError(
                             f"{camera_feature.source}:{camera_feature.line}: feature image does "
                             f"not match master row image for {sample_id!r}"
@@ -694,7 +779,7 @@ def _session_rows(
                 )
                 _validate_front_input_contract(
                     input_item,
-                    image=image,
+                    image=master_image,
                     master_row=row,
                     width=width,
                     height=height,
@@ -707,7 +792,7 @@ def _session_rows(
             else:
                 pose = _blank_front_pose()
             annotation_feature = camera_feature
-            if view == "phonecam" and side_annotation_index is not None:
+            if view == "phonecam" and side_roi_index is None and side_annotation_index is not None:
                 annotation_feature = side_annotation_index.get(sample_id, camera_feature)
                 if annotation_feature is not None and annotation_feature is not camera_feature:
                     _validate_join_identity(
@@ -717,18 +802,25 @@ def _session_rows(
                         pair_id=pair_id,
                         participant_key="participant",
                     )
-            annotations = (
-                _side_annotations(annotation_feature)
-                if view == "phonecam"
-                else _side_annotations(None)
-            )
+            if (
+                view == "phonecam"
+                and side_roi_index is not None
+                and pair_id not in missing_side_roi_pairs
+            ):
+                annotations = _precomputed_side_roi_annotations()
+            else:
+                annotations = (
+                    _side_annotations(annotation_feature)
+                    if view == "phonecam"
+                    else _side_annotations(None)
+                )
             output.append(
                 {
                     "sample_id": sample_id,
                     "subject_id": subject,
                     "session_id": session,
                     "view": view,
-                    "image_path": image.relative_to(root).as_posix(),
+                    "image_path": _manifest_image_path(image, manifest_root),
                     "pair_id": pair_id,
                     "target_x_px": _target(
                         row["target_x_px"],
@@ -754,20 +846,20 @@ def _session_rows(
                     "protocol": _required(row, "protocol", source=source, line=line),
                     "source_frame": _required(row, "source_frame", source=source, line=line),
                     "feature_csv_path": (
-                        annotation_feature.source.relative_to(root).as_posix()
+                        annotation_feature.source.relative_to(manifest_root).as_posix()
                         if annotation_feature is not None
-                        and _is_within(annotation_feature.source, root)
+                        and _is_within(annotation_feature.source, manifest_root)
                         else (
                             feature_root / ("web" if view == "webcam" else "phone") / "features.csv"
                         )
-                        .relative_to(root)
+                        .relative_to(manifest_root)
                         .as_posix()
                     ),
                     "feature_csv_line": (
                         annotation_feature.line if annotation_feature is not None else ""
                     ),
                     "input_csv_path": (
-                        input_item.source.relative_to(root).as_posix()
+                        input_item.source.relative_to(manifest_root).as_posix()
                         if input_item is not None
                         else ""
                     ),
@@ -775,13 +867,21 @@ def _session_rows(
                 }
             )
     _validate_session_pairs(output, subject=subject, session=session)
+    if side_roi_index is not None:
+        unused_side_roi = sorted(set(side_roi_index) - seen_side_roi_names)
+        if unused_side_roi:
+            raise MeasuredManifestError(
+                f"{side_roi_dir}: {len(unused_side_roi)} ROI images do not match a phone "
+                f"master frame; examples={unused_side_roi[:3]}"
+            )
     unexpected_inputs = sorted(set(input_index) - seen_front_inputs)
     if unexpected_inputs:
         raise MeasuredManifestError(
             f"{input_csv}: {len(unexpected_inputs)} inputs.csv rows do not match a Front "
             "master sample"
         )
-    filtered = tuple(row for row in output if str(row["pair_id"]) not in invalid_pairs)
+    excluded_pairs = invalid_pairs | missing_side_roi_pairs
+    filtered = tuple(row for row in output if str(row["pair_id"]) not in excluded_pairs)
     _validate_session_pairs(filtered, subject=subject, session=session)
     if any(row["head_pose_valid"] != "true" for row in filtered if row["view"] == "webcam"):
         raise MeasuredManifestError(
@@ -791,6 +891,7 @@ def _session_rows(
         rows=filtered,
         source_pairs=len(output) // 2,
         dropped_invalid_pairs=len(invalid_pairs),
+        dropped_missing_side_roi_pairs=len(missing_side_roi_pairs - invalid_pairs),
         front_input_rows=len(input_rows),
     )
 
@@ -851,9 +952,11 @@ def create_manifest(
     source_root: str | Path,
     output_manifest: str | Path,
     *,
+    dataset_root: str | Path | None = None,
     subjects: Sequence[str] | None = None,
     sessions: Sequence[str] = DEFAULT_SESSIONS,
     side_annotations: str | Path | None = None,
+    side_roi_root: str | Path | None = None,
     require_side_annotations: bool = False,
     require_front_pose: bool = False,
     force: bool = False,
@@ -864,12 +967,42 @@ def create_manifest(
     if not root.is_dir():
         raise MeasuredManifestError(f"source root is not a directory: {root}")
     output = Path(output_manifest).expanduser().resolve(strict=False)
+    manifest_root = (
+        Path(dataset_root).expanduser().resolve(strict=True) if dataset_root is not None else root
+    )
+    if not manifest_root.is_dir():
+        raise MeasuredManifestError(f"dataset root is not a directory: {manifest_root}")
+    if not _is_within(root, manifest_root):
+        raise MeasuredManifestError(
+            f"source root must be contained by dataset root {manifest_root}: {root}"
+        )
     if _is_within(output, root):
         raise MeasuredManifestError("output manifest must be outside the read-only source root")
+    if side_annotations is not None and side_roi_root is not None:
+        raise MeasuredManifestError("side_annotations and side_roi_root are mutually exclusive")
     selected_sessions = tuple(_safe_session(session) for session in sessions)
     if not selected_sessions or len(set(selected_sessions)) != len(selected_sessions):
         raise MeasuredManifestError("--sessions must contain unique session names")
     subject_dirs = _discover_subjects(root, subjects)
+    side_roi_base: Path | None = None
+    side_roi_subjects: dict[str, Path] = {}
+    if side_roi_root is not None:
+        side_roi_base = Path(side_roi_root).expanduser().resolve(strict=True)
+        if not side_roi_base.is_dir():
+            raise MeasuredManifestError(f"Side ROI root is not a directory: {side_roi_base}")
+        if not _is_within(side_roi_base, manifest_root):
+            raise MeasuredManifestError(
+                f"Side ROI root must be contained by dataset root {manifest_root}: {side_roi_base}"
+            )
+        for candidate in side_roi_base.iterdir():
+            if not candidate.is_dir() or candidate.name.startswith("."):
+                continue
+            key = _nfc(candidate.name)
+            if key in side_roi_subjects:
+                raise MeasuredManifestError(
+                    f"Side ROI subject directories collide after NFC normalization: {key!r}"
+                )
+            side_roi_subjects[key] = candidate
     side_annotation_index: dict[str, _IndexedRow] | None = None
     if side_annotations is not None:
         side_path = Path(side_annotations).expanduser().resolve(strict=True)
@@ -889,18 +1022,41 @@ def create_manifest(
     rows: list[dict[str, str | int]] = []
     source_pairs = 0
     dropped_invalid_pairs = 0
+    dropped_missing_side_roi_pairs = 0
+    skipped_missing_side_roi_sessions = 0
     front_input_rows = 0
+    included_subjects: set[str] = set()
     for subject_dir in subject_dirs:
         for session in selected_sessions:
+            side_roi_dir: Path | None = None
+            if side_roi_base is not None:
+                roi_subject = side_roi_subjects.get(_nfc(subject_dir.name))
+                roi_session = (
+                    _unicode_child_directory(roi_subject, session)
+                    if roi_subject is not None
+                    else None
+                )
+                side_roi_dir = (
+                    _unicode_child_directory(roi_session, "side_eye_roi")
+                    if roi_session is not None
+                    else None
+                )
+                if side_roi_dir is None or not _index_side_roi_images(side_roi_dir):
+                    skipped_missing_side_roi_sessions += 1
+                    continue
             session_result = _session_rows(
                 root,
                 subject_dir,
                 session,
+                dataset_root=manifest_root,
+                side_roi_dir=side_roi_dir,
                 side_annotation_index=side_annotation_index,
             )
             rows.extend(session_result.rows)
+            included_subjects.add(_nfc(subject_dir.name))
             source_pairs += session_result.source_pairs
             dropped_invalid_pairs += session_result.dropped_invalid_pairs
+            dropped_missing_side_roi_pairs += session_result.dropped_missing_side_roi_pairs
             front_input_rows += session_result.front_input_rows
 
     if not rows:
@@ -922,12 +1078,14 @@ def create_manifest(
     _write_manifest(output, rows, force=force)
     return ManifestSummary(
         path=output,
-        subjects=tuple(_nfc(path.name) for path in subject_dirs),
+        subjects=tuple(sorted(included_subjects)),
         sessions=selected_sessions,
         front_input_rows=front_input_rows,
         source_pairs=source_pairs,
         output_pairs=len(rows) // 2,
         dropped_invalid_pairs=dropped_invalid_pairs,
+        dropped_missing_side_roi_pairs=dropped_missing_side_roi_pairs,
+        skipped_missing_side_roi_sessions=skipped_missing_side_roi_sessions,
         output_rows=len(rows),
         front_pose_valid_rows=front_valid,
         front_pose_missing_rows=len(front_rows) - front_valid,
@@ -942,9 +1100,11 @@ def main() -> int:
         result = create_manifest(
             args.source_root,
             args.output_manifest,
+            dataset_root=args.dataset_root,
             subjects=args.subjects,
             sessions=args.sessions,
             side_annotations=args.side_annotations,
+            side_roi_root=args.side_roi_root,
             require_side_annotations=args.require_side_annotations,
             require_front_pose=args.require_front_pose,
             force=args.force,
@@ -957,6 +1117,11 @@ def main() -> int:
     print(f"inputs.csv rows: {result.front_input_rows}")
     print(f"inputs.csv-approved pairs kept: {result.output_pairs}")
     print(f"inputs.csv-rejected pairs dropped: {result.dropped_invalid_pairs}")
+    print(f"missing Side ROI pairs dropped: {result.dropped_missing_side_roi_pairs}")
+    print(
+        "subject/session groups skipped for missing Side ROI data: "
+        f"{result.skipped_missing_side_roi_sessions}"
+    )
     print(f"source pairs: {result.source_pairs}, output rows: {result.output_rows}")
     print(
         f"front pose valid/missing: {result.front_pose_valid_rows}/{result.front_pose_missing_rows}"

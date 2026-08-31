@@ -742,6 +742,15 @@ def _pipeline_loss(
     total = _masked_xy_loss(final_prediction, target, final_mask, primary)
     total = total * float(primary.get("weight", 1.0))
 
+    grid_auxiliary = _mapping(loss_config.get("grid_auxiliary"), "loss.grid_auxiliary")
+    if bool(grid_auxiliary.get("enabled", False)):
+        total = total + float(grid_auxiliary.get("weight", 1.0)) * _masked_grid_cell_loss(
+            final_prediction,
+            target,
+            final_mask,
+            grid_auxiliary,
+        )
+
     auxiliary = _mapping(loss_config.get("branch_auxiliary"), "loss.branch_auxiliary")
     if bool(auxiliary.get("enabled", False)):
         front_weight = float(auxiliary.get("front_weight", 0.0))
@@ -821,6 +830,51 @@ def _inverse_frequency_weights(target: torch.Tensor, config: Mapping[str, Any]) 
     return weights / weights.mean().clamp_min(torch.finfo(weights.dtype).eps)
 
 
+def _masked_grid_cell_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    config: Mapping[str, Any],
+) -> torch.Tensor:
+    """Penalize only the distance lying outside the target's screen cell."""
+
+    prediction = _as_prediction(prediction, width=2, name="grid prediction")
+    target = _as_prediction(target, width=2, name="grid target")
+    mask = (
+        mask.reshape(-1).bool()
+        & torch.isfinite(prediction).all(dim=1)
+        & torch.isfinite(target).all(dim=1)
+    )
+    if not bool(mask.any()):
+        return prediction.sum() * 0.0
+
+    grid = config.get("grid_size", [3, 3])
+    if not isinstance(grid, Sequence) or isinstance(grid, str | bytes) or len(grid) != 2:
+        raise TrainingError("loss.grid_auxiliary.grid_size는 [x_bins, y_bins]여야 합니다.")
+    bins = prediction.new_tensor([int(grid[0]), int(grid[1])])
+    if bool((bins <= 0).any()):
+        raise TrainingError("loss.grid_auxiliary.grid_size 값은 양수여야 합니다.")
+
+    selected_prediction = prediction[mask]
+    selected_target = target[mask]
+    epsilon = torch.finfo(selected_target.dtype).eps
+    target01 = (selected_target + 0.5).clamp(0.0, 1.0 - epsilon)
+    cell_index = torch.floor(target01 * bins).to(selected_target.dtype)
+    lower = cell_index / bins - 0.5
+    upper = (cell_index + 1.0) / bins - 0.5
+    outside_distance = torch.relu(lower - selected_prediction) + torch.relu(
+        selected_prediction - upper
+    )
+
+    axis_weights = config.get("axis_weights")
+    if isinstance(axis_weights, Mapping):
+        weights = outside_distance.new_tensor(
+            [float(axis_weights.get("x", 1.0)), float(axis_weights.get("y", 1.0))]
+        )
+        outside_distance = outside_distance * weights
+    return outside_distance.mean()
+
+
 def compute_gaze_metrics(
     predictions: torch.Tensor,
     targets: torch.Tensor,
@@ -837,12 +891,13 @@ def compute_gaze_metrics(
     if prediction.shape != target.shape or prediction.shape[0] == 0:
         raise TrainingError("metric prediction과 target은 비어 있지 않은 같은 [N,2]여야 합니다.")
     error = prediction - target
+    absolute_error = error.abs()
     distance = torch.linalg.vector_norm(error, dim=1)
     metrics: dict[str, float] = {
         "euclidean_normalized_mean": float(distance.mean()),
         "euclidean_normalized_median": float(distance.median()),
-        "mae_x_normalized": float(error[:, 0].abs().mean()),
-        "mae_y_normalized": float(error[:, 1].abs().mean()),
+        "mae_x_normalized": float(absolute_error[:, 0].mean()),
+        "mae_y_normalized": float(absolute_error[:, 1].mean()),
         "rmse_normalized": float(error.square().mean().sqrt()),
         "out_of_bounds_rate": float(
             ((prediction < -0.5) | (prediction > 0.5)).any(dim=1).float().mean()
@@ -850,6 +905,28 @@ def compute_gaze_metrics(
     }
     subject_values = list(subjects or ["unknown"] * prediction.shape[0])
     metrics["subject_macro_euclidean_normalized"] = _subject_macro(distance, subject_values)
+    metrics["subject_macro_mae_x_normalized"] = _subject_macro(
+        absolute_error[:, 0], subject_values
+    )
+    metrics["subject_macro_mae_y_normalized"] = _subject_macro(
+        absolute_error[:, 1], subject_values
+    )
+
+    prediction_cells = _grid_cell_indices(prediction, x_bins=3, y_bins=3)
+    target_cells = _grid_cell_indices(target, x_bins=3, y_bins=3)
+    cell_delta = (prediction_cells - target_cells).abs()
+    same_column = cell_delta[:, 0] == 0
+    same_row = cell_delta[:, 1] == 0
+    same_cell = same_column & same_row
+    metrics["same_cell_rate_3x3"] = float(same_cell.float().mean())
+    metrics["same_column_rate_3x3"] = float(same_column.float().mean())
+    metrics["same_row_rate_3x3"] = float(same_row.float().mean())
+    metrics["subject_macro_same_cell_rate_3x3"] = _subject_macro(
+        same_cell.float(), subject_values
+    )
+    metrics["mean_cell_manhattan_distance_3x3"] = float(
+        cell_delta.sum(dim=1).float().mean()
+    )
 
     px_distance: torch.Tensor | None = None
     cm_distance_all: torch.Tensor | None = None
@@ -905,6 +982,16 @@ def compute_gaze_metrics(
             if bool(valid.any()):
                 metrics[name] = float((values[valid] <= threshold).float().mean())
     return metrics
+
+
+def _grid_cell_indices(
+    coordinates: torch.Tensor, *, x_bins: int, y_bins: int
+) -> torch.Tensor:
+    """Map centered normalized screen coordinates to clamped integer cells."""
+
+    bins = coordinates.new_tensor([x_bins, y_bins])
+    normalized = (coordinates + 0.5).clamp(0.0, 1.0 - torch.finfo(coordinates.dtype).eps)
+    return torch.floor(normalized * bins).long()
 
 
 def _subject_macro(

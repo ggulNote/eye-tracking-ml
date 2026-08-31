@@ -18,21 +18,26 @@ MLFLOW_PORT ?= 5000
 DUAL_DEMO_ROOT ?= $(PROJECT_ROOT)/.demo/dual_view_training
 DUAL_DEMO_DB ?= $(DUAL_DEMO_ROOT)/mlflow-training-demo.db
 DUAL_DEMO_PROFILE := $(PROJECT_ROOT)/configs/profiles/demo_dual_view_training.yaml
-MEASURED_DATA_ROOT ?= $(PROJECT_ROOT)/../project_data/data
+MEASURED_DATA_ROOT ?= $(PROJECT_ROOT)/Participants
+MEASURED_DATASET_ROOT ?= $(abspath $(PROJECT_ROOT)/..)
+SIDE_ROI_DATA_ROOT ?= $(abspath $(PROJECT_ROOT)/../new)
 MEASURED_RUN_ROOT ?= $(PROJECT_ROOT)/.demo/measured_head_down_neutral
 MEASURED_DATA_MANIFEST ?= $(MEASURED_RUN_ROOT)/manifest.csv
 MEASURED_OUTPUT ?= $(MEASURED_RUN_ROOT)/outputs
 MEASURED_DB ?= $(MEASURED_RUN_ROOT)/mlflow.db
 MEASURED_PREVIEW_OUTPUT ?= $(PROJECT_ROOT)/outputs/measured_preprocessing_preview
+SIDE_ROI_OUTPUT ?= $(MEASURED_RUN_ROOT)/side_roi_detection
 MEASURED_DATA_PROFILE := $(PROJECT_ROOT)/configs/profiles/measured_head_down_neutral.yaml
-SIDE_ANNOTATIONS ?= $(MEASURED_DATA_ROOT)/side_annotations.csv
+SIDE_ANNOTATIONS ?= $(MEASURED_RUN_ROOT)/side_annotations.csv
+SIDE_REVIEW_OVERRIDES ?=
 FRONT_PREPROCESS_PROFILE := $(PROJECT_ROOT)/configs/profiles/blazegaze.yaml
 FRONT_MODEL_PROFILE := $(PROJECT_ROOT)/configs/models/front_webeyetrack.yaml
 SIDE_PREPROCESS_PROFILE := $(PROJECT_ROOT)/configs/profiles/side_profile_90.yaml
-SIDE_ROI_PROFILE := $(PROJECT_ROOT)/configs/profiles/side_roi_only.yaml
+SIDE_ROI_PROFILE := $(PROJECT_ROOT)/configs/profiles/side_precomputed_roi.yaml
 SIDE_MODEL_PROFILE ?= $(PROJECT_ROOT)/configs/models/side_mobilenet_v4.yaml
 WEBEYETRACK_ASSET_DIR ?= $(PROJECT_ROOT)/models
 MEDIAPIPE_FACE_MODEL ?= $(WEBEYETRACK_ASSET_DIR)/face_landmarker_v2_with_blendshapes.task
+YUNET_FACE_MODEL ?= $(WEBEYETRACK_ASSET_DIR)/face_detection_yunet_2023mar.onnx
 WEBEYETRACK_WEIGHTS ?= $(WEBEYETRACK_ASSET_DIR)/blazegaze_mpiifacegaze.keras
 CHECKPOINT ?=
 EVAL_SPLIT ?= test
@@ -43,7 +48,8 @@ CHECKPOINT_ARG = $(if $(strip $(CHECKPOINT)),--checkpoint "$(CHECKPOINT)",)
 .PHONY: help paths show-paths setup setup-dev require-venv require-data \
 	check-setup validate-config validate prepare train evaluate mlflow-check check-mlflow \
 	mlflow-ui demo-dual-train \
-	measured-manifest measured-prepare measured-preview measured-train measured-evaluate \
+	measured-side-annotations measured-manifest measured-prepare measured-preview \
+	measured-train measured-evaluate \
 	measured-mlflow-ui \
 	webeyetrack-assets check-webeyetrack-assets \
 	test lint format-check check clean-cache
@@ -61,9 +67,10 @@ help:
 	@echo "  make mlflow-check   SQLite DB와 FINISHED run 확인"
 	@echo "  make mlflow-ui      http://127.0.0.1:5000 UI 실행"
 	@echo "  make demo-dual-train 합성 Front/Side DB와 내장 fallback 모델의 Y축 fusion smoke test"
+	@echo "  make measured-side-annotations phone frame의 Side 눈 bbox 자동 생성과 검수 자료 저장"
 	@echo "  make measured-manifest 이름별 DB의 head_down·neutral canonical manifest 생성"
 	@echo "  make measured-prepare 피험자 단위 train/validation/test split과 pairing 검증"
-	@echo "  make measured-preview inputs.csv 기반 실제 Front 전처리와 Side 상태 plot"
+	@echo "  make measured-preview 외부 Side ROI 크기 audit와 실제 128x256 결과 plot"
 	@echo "  make measured-train Side annotation 준비 후 선택한 Side Encoder로 전체 학습"
 	@echo "  make measured-evaluate CHECKPOINT=... 같은 Config로 validation/test 평가"
 	@echo "  make measured-mlflow-ui 측정 DB 전용 MLflow UI 실행"
@@ -89,13 +96,18 @@ paths:
 	@echo "DUAL_DEMO_ROOT=$(DUAL_DEMO_ROOT)"
 	@echo "DUAL_DEMO_DB=$(DUAL_DEMO_DB)"
 	@echo "MEASURED_DATA_ROOT=$(MEASURED_DATA_ROOT)"
+	@echo "MEASURED_DATASET_ROOT=$(MEASURED_DATASET_ROOT)"
+	@echo "SIDE_ROI_DATA_ROOT=$(SIDE_ROI_DATA_ROOT)"
 	@echo "MEASURED_DATA_MANIFEST=$(MEASURED_DATA_MANIFEST)"
 	@echo "MEASURED_OUTPUT=$(MEASURED_OUTPUT)"
 	@echo "MEASURED_DB=$(MEASURED_DB)"
 	@echo "MEASURED_PREVIEW_OUTPUT=$(MEASURED_PREVIEW_OUTPUT)"
+	@echo "SIDE_ROI_OUTPUT=$(SIDE_ROI_OUTPUT)"
 	@echo "SIDE_ANNOTATIONS=$(SIDE_ANNOTATIONS)"
+	@echo "SIDE_REVIEW_OVERRIDES=$(if $(strip $(SIDE_REVIEW_OVERRIDES)),$(SIDE_REVIEW_OVERRIDES),<none>)"
 	@echo "SIDE_MODEL_PROFILE=$(SIDE_MODEL_PROFILE)"
 	@echo "MEDIAPIPE_FACE_MODEL=$(MEDIAPIPE_FACE_MODEL)"
+	@echo "YUNET_FACE_MODEL=$(YUNET_FACE_MODEL)"
 	@echo "WEBEYETRACK_WEIGHTS=$(WEBEYETRACK_WEIGHTS)"
 	@echo "CHECKPOINT=$(if $(strip $(CHECKPOINT)),$(CHECKPOINT),<config-default>)"
 	@echo "EVAL_SPLIT=$(EVAL_SPLIT)"
@@ -155,18 +167,30 @@ demo-dual-train: require-venv
 	@DUAL_DEMO_MANIFEST="$(DUAL_DEMO_ROOT)/manifest.csv" GAZE_DATA_ROOT="$(DUAL_DEMO_ROOT)" GAZE_OUTPUT_ROOT="$(DUAL_DEMO_ROOT)/outputs" MLFLOW_TRACKING_URI="sqlite:///$(DUAL_DEMO_DB)" "$(VENV_PYTHON)" -m gaze_pipeline train --config "$(CONFIG)" --profile "$(DUAL_DEMO_PROFILE)" $(OVERRIDES)
 	@MLFLOW_TRACKING_URI="sqlite:///$(DUAL_DEMO_DB)" "$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/check_mlflow.py" --require-db
 
+measured-side-annotations: require-venv check-webeyetrack-assets
+	@if [[ ! -d "$(MEASURED_DATA_ROOT)" ]]; then echo "측정 DB 폴더가 없습니다: $(MEASURED_DATA_ROOT)"; exit 2; fi
+	@mkdir -p "$(SIDE_ROI_OUTPUT)" "$(MEASURED_RUN_ROOT)"
+	@"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/generate_side_eye_annotations.py" \
+		--data-root "$(MEASURED_DATA_ROOT)" \
+		--output-dir "$(SIDE_ROI_OUTPUT)" \
+		--output-csv "$(SIDE_ANNOTATIONS)" \
+		--model-asset "$(MEDIAPIPE_FACE_MODEL)" \
+		--yunet-model "$(YUNET_FACE_MODEL)" \
+		--sessions head_down neutral --detector hybrid --force $(if $(strip $(SIDE_REVIEW_OVERRIDES)),--review-overrides "$(SIDE_REVIEW_OVERRIDES)",)
+
 measured-manifest: require-venv
 	@if [[ ! -d "$(MEASURED_DATA_ROOT)" ]]; then echo "측정 DB 폴더가 없습니다: $(MEASURED_DATA_ROOT)"; exit 2; fi
-	@if [[ ! -f "$(SIDE_ANNOTATIONS)" ]]; then echo "Side bbox annotation CSV가 없습니다: $(SIDE_ANNOTATIONS)"; echo "필수 열: sample_id, visible_eye, visible_eye_bbox_xyxy, eye_annotation_valid"; exit 2; fi
+	@if [[ ! -d "$(SIDE_ROI_DATA_ROOT)" ]]; then echo "Side ROI 폴더가 없습니다: $(SIDE_ROI_DATA_ROOT)"; exit 2; fi
 	@mkdir -p "$(MEASURED_RUN_ROOT)"
 	@"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/create_measured_data_manifest.py" \
 		--source-root "$(MEASURED_DATA_ROOT)" \
+		--dataset-root "$(MEASURED_DATASET_ROOT)" \
+		--side-roi-root "$(SIDE_ROI_DATA_ROOT)" \
 		--output-manifest "$(MEASURED_DATA_MANIFEST)" \
-		--sessions head_down neutral --side-annotations "$(SIDE_ANNOTATIONS)" \
-		--require-front-pose --require-side-annotations --force
+		--sessions head_down neutral --require-front-pose --force
 
 measured-prepare: measured-manifest
-	@GAZE_DATA_ROOT="$(MEASURED_DATA_ROOT)" MEASURED_DATA_MANIFEST="$(MEASURED_DATA_MANIFEST)" \
+	@GAZE_DATA_ROOT="$(MEASURED_DATASET_ROOT)" MEASURED_DATA_MANIFEST="$(MEASURED_DATA_MANIFEST)" \
 		GAZE_OUTPUT_ROOT="$(MEASURED_OUTPUT)" MLFLOW_TRACKING_URI="sqlite:///$(MEASURED_DB)" \
 		"$(VENV_PYTHON)" -m gaze_pipeline prepare --config "$(CONFIG)" \
 		--profile "$(FRONT_PREPROCESS_PROFILE)" \
@@ -176,27 +200,22 @@ measured-prepare: measured-manifest
 		--profile "$(FRONT_MODEL_PROFILE)" \
 		--profile "$(SIDE_MODEL_PROFILE)"
 
-measured-preview: require-venv check-webeyetrack-assets
-	@mkdir -p "$(MEASURED_RUN_ROOT)/matplotlib"
-	@KERAS_BACKEND=torch MPLCONFIGDIR="$(MEASURED_RUN_ROOT)/matplotlib" \
-		"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/preview_measured_inputs_preprocessing.py" \
-		--data-root "$(MEASURED_DATA_ROOT)" \
+measured-preview: require-venv
+	@"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/preview_precomputed_side_roi.py" \
+		--side-roi-root "$(SIDE_ROI_DATA_ROOT)" \
 		--output-dir "$(MEASURED_PREVIEW_OUTPUT)" \
-		--config "$(CONFIG)" \
-		--front-profile "$(FRONT_PREPROCESS_PROFILE)" \
-		--model-asset "$(MEDIAPIPE_FACE_MODEL)" \
-		--side-annotations "$(SIDE_ANNOTATIONS)" \
-		--samples 2 --sessions head_down neutral --overwrite
+		--samples-per-session 1 --sessions head_down neutral
 
 measured-train: require-venv check-webeyetrack-assets
 	@if [[ ! -d "$(MEASURED_DATA_ROOT)" ]]; then echo "측정 DB 폴더가 없습니다: $(MEASURED_DATA_ROOT)"; exit 2; fi
 	@mkdir -p "$(MEASURED_RUN_ROOT)"
 	@"$(VENV_PYTHON)" "$(PROJECT_ROOT)/scripts/create_measured_data_manifest.py" \
 		--source-root "$(MEASURED_DATA_ROOT)" \
+		--dataset-root "$(MEASURED_DATASET_ROOT)" \
+		--side-roi-root "$(SIDE_ROI_DATA_ROOT)" \
 		--output-manifest "$(MEASURED_DATA_MANIFEST)" \
-		--sessions head_down neutral --side-annotations "$(SIDE_ANNOTATIONS)" \
-		--require-front-pose --require-side-annotations --force
-	@GAZE_DATA_ROOT="$(MEASURED_DATA_ROOT)" MEASURED_DATA_MANIFEST="$(MEASURED_DATA_MANIFEST)" \
+		--sessions head_down neutral --require-front-pose --force
+	@GAZE_DATA_ROOT="$(MEASURED_DATASET_ROOT)" MEASURED_DATA_MANIFEST="$(MEASURED_DATA_MANIFEST)" \
 		GAZE_OUTPUT_ROOT="$(MEASURED_OUTPUT)" MLFLOW_TRACKING_URI="sqlite:///$(MEASURED_DB)" \
 		MEDIAPIPE_FACE_MODEL="$(MEDIAPIPE_FACE_MODEL)" \
 		WEBEYETRACK_WEIGHTS="$(WEBEYETRACK_WEIGHTS)" KERAS_BACKEND=torch \
@@ -212,7 +231,7 @@ measured-evaluate: require-venv check-webeyetrack-assets
 	@if [[ ! -f "$(MEASURED_DATA_MANIFEST)" ]]; then echo "먼저 make measured-manifest를 실행하세요: $(MEASURED_DATA_MANIFEST)"; exit 2; fi
 	@if [[ -z "$(strip $(CHECKPOINT))" ]]; then echo "CHECKPOINT 절대경로가 필요합니다."; exit 2; fi
 	@if [[ ! -f "$(CHECKPOINT)" ]]; then echo "checkpoint가 없습니다: $(CHECKPOINT)"; exit 2; fi
-	@GAZE_DATA_ROOT="$(MEASURED_DATA_ROOT)" MEASURED_DATA_MANIFEST="$(MEASURED_DATA_MANIFEST)" \
+	@GAZE_DATA_ROOT="$(MEASURED_DATASET_ROOT)" MEASURED_DATA_MANIFEST="$(MEASURED_DATA_MANIFEST)" \
 		GAZE_OUTPUT_ROOT="$(MEASURED_OUTPUT)" MLFLOW_TRACKING_URI="sqlite:///$(MEASURED_DB)" \
 		MEDIAPIPE_FACE_MODEL="$(MEDIAPIPE_FACE_MODEL)" \
 		WEBEYETRACK_WEIGHTS="$(WEBEYETRACK_WEIGHTS)" KERAS_BACKEND=torch \

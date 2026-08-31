@@ -144,7 +144,7 @@ model:
 
 training:
   # representation 학습 epoch 수입니다.
-  max_epochs: 20
+  max_epochs: 50
 
 optimizer:
   # 참고 논문과 맞춘 Adam 설정입니다.

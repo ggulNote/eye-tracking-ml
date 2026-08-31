@@ -6,11 +6,101 @@ import torch
 from PIL import Image
 
 from gaze_pipeline.config import load_config
-from gaze_pipeline.data.transforms import OpenCVHaarFaceDetector, OrderedGazePreprocessor
+from gaze_pipeline.data.transforms import (
+    OpenCVHaarFaceDetector,
+    OrderedGazePreprocessor,
+    center_crop_pad_precomputed_roi,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BASE_CONFIG = PROJECT_ROOT / "configs" / "config.yaml"
 BLAZEGAZE_PROFILE = PROJECT_ROOT / "configs" / "profiles" / "blazegaze.yaml"
+
+
+def test_precomputed_side_roi_center_crop_and_black_canvas_preserve_pixels() -> None:
+    image = np.zeros((130, 132, 3), dtype=np.uint8)
+    image[..., 0] = np.arange(132, dtype=np.uint8)[None, :]
+    image[..., 1] = np.arange(130, dtype=np.uint8)[:, None]
+
+    output = center_crop_pad_precomputed_roi(image)
+
+    assert output.shape == (128, 256, 3)
+    np.testing.assert_array_equal(output[:, 64:192], image[1:129, 2:130])
+    assert np.count_nonzero(output[:, :64]) == 0
+    assert np.count_nonzero(output[:, 192:]) == 0
+
+
+def test_precomputed_side_roi_pads_sub_128_image_without_resampling() -> None:
+    image = np.full((126, 124, 3), (10, 20, 30), dtype=np.uint8)
+
+    output = center_crop_pad_precomputed_roi(image)
+
+    np.testing.assert_array_equal(output[1:127, 66:190], image)
+    assert np.count_nonzero(output[0]) == 0
+    assert np.count_nonzero(output[:, :64]) == 0
+
+
+def test_precomputed_side_roi_stage_normalizes_to_expected_model_contract() -> None:
+    config = {
+        "stage_order": ["decode", "eye_region_warp", "normalize"],
+        "decode": {"enabled": True},
+        "eye_region_warp": {
+            "enabled": True,
+            "method": "precomputed_side_roi",
+            "content_size_hw": [128, 128],
+            "size_hw": [128, 256],
+            "pad_rgb": [0, 0, 0],
+        },
+        "normalize": {"enabled": True, "mode": "zero_one", "channel_order": "CHW"},
+    }
+    image = np.full((128, 128, 3), 255, dtype=np.uint8)
+
+    output = OrderedGazePreprocessor(config, split="validation")(
+        {"image": image, "view": "side", "metadata": {}}
+    )
+
+    assert output["image"].shape == (3, 128, 256)
+    assert output["image"].dtype == torch.float32
+    assert torch.all(output["image"][:, :, 64:192] == 1.0)
+    assert torch.count_nonzero(output["image"][:, :, :64]).item() == 0
+    assert output["metadata"]["representation"] == "precomputed_side_roi_center_crop_pad_v1"
+
+
+def test_precomputed_front_eye_roi_is_pixel_exact_before_normalization() -> None:
+    config = {
+        "stage_order": ["decode", "metric_head_pose", "eye_region_warp", "normalize"],
+        "decode": {"enabled": True},
+        "face_landmarks": {"enabled": False},
+        "metric_head_pose": {
+            "enabled": True,
+            "source": "precomputed_only",
+            "precomputed_face_origin_unit": "cm",
+        },
+        "eye_region_warp": {
+            "enabled": True,
+            "method": "precomputed_front_eye_roi",
+            "content_size_hw": [128, 512],
+            "size_hw": [128, 512],
+        },
+        "normalize": {"enabled": True, "mode": "zero_one", "channel_order": "CHW"},
+    }
+    image = np.arange(128 * 512 * 3, dtype=np.uint32).reshape(128, 512, 3).astype(np.uint8)
+
+    output = OrderedGazePreprocessor(config, split="validation")(
+        {
+            "image": image,
+            "view": "front",
+            "metadata": {
+                "head_vector": np.asarray([0.0, 0.0, -1.0], dtype=np.float32),
+                "face_origin_3d": np.asarray([0.0, 0.0, 60.0], dtype=np.float32),
+                "head_pose_valid": True,
+            },
+        }
+    )
+
+    restored = np.rint(output["image"].permute(1, 2, 0).numpy() * 255.0).astype(np.uint8)
+    np.testing.assert_array_equal(restored, image)
+    assert output["metadata"]["representation"] == "precomputed_front_eye_roi_passthrough_v1"
 
 
 def write_face_image(path: Path) -> np.ndarray:

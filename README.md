@@ -4,6 +4,21 @@
 config-driven PyTorch 파이프라인입니다. Front는 WebEyeTrack/BlazeGaze를 사용하고,
 Side는 `y`축 residual만 예측합니다.
 
+## 핵심 요약
+
+| 항목 | 현재 기준 |
+|---|---|
+| Task | 화면 중심 기준 2D 시선 좌표 회귀 |
+| 좌표계 | `x,y ∈ [-0.5, 0.5]`, 오른쪽·아래쪽이 양수 |
+| Front | WebEyeTrack BlazeGaze, 사전 생성된 `128×512` 양안 ROI |
+| Side | `128×128` ROI를 `128×256` 검정 canvas 중앙에 배치 |
+| Fusion | `x_final=x_front`, `y_final=y_front+w·delta_y_side` |
+| Split | `subject_id` 기준 `70/15/15`, seed `42` |
+| 추적 | MLflow에 config·epoch metric·checkpoint·환경·lineage 기록 |
+
+원본 얼굴 이미지, 피험자 식별자가 포함된 manifest, 모델 weight, 전처리 cache와 MLflow DB는
+Git에 포함하지 않습니다. 저장소에는 파이프라인 코드·설정·문서·테스트만 보관합니다.
+
 ## 전체 구조
 
 ```mermaid
@@ -32,41 +47,59 @@ flowchart LR
 - train/validation/test loop, loss·metric, Y축 fusion
 - best/last/final `.pt`, resume, evaluate, MLflow 기록
 
+## 모델 구성
+
+| Branch | 구현과 초기화 | 입력 | 출력 |
+|---|---|---|---|
+| Front | 공식 WebEyeTrack BlazeGaze `.keras`; encoder 고정, gaze MLP 학습 | `front_image [B,3,128,512]`, `front_head_vector [B,3]`, `front_face_origin_3d [B,3]` | `gaze_xy [B,2]` |
+| Side / BlazeGaze | WebEyeTrack commit `14719ad`의 CNN encoder 구조 재현; 기본값은 random init, 변환된 encoder `.pt` 선택 가능 | `side_image [B,3,128,256]` + 선택 feature | `delta_y_side [B,1]`, `side_embedding [B,256]`, `quality [B,1]` |
+| Side / MobileNetV4 | `mobilenetv4_conv_small.e2400_r224_in1k`; 기본값 `pretrained=false` | 위와 동일 | 위와 동일 |
+| Fusion | 학습 가능한 Y축 residual weight | Front `(x,y)` + Side `delta_y_side` | 최종 `gaze_xy [B,2]` |
+
+Front weight는 `configs/models/front_webeyetrack.yaml`의 SHA-256으로 검증합니다. 기본
+`unfreeze_encoder=false`에서는 전체 156,018개 parameter 중 gaze head 8,610개만 학습합니다.
+Side model은 실행 시 `SIDE_MODEL_PROFILE`로 BlazeGaze-transfer와 MobileNetV4 중 하나를 선택합니다.
+
+좌표에 음수가 필요하므로 최종 출력에는 ReLU를 사용하지 않습니다. `quality` head는 현재 별도
+target/loss가 없어 학습 품질 지표로 사용하지 않습니다.
+
 ## 데이터 계약
 
 학습 대상은 각 피험자의 `head_down`, `neutral` session입니다.
 
 ```text
-<subject>/<session>/
-└── feature_maps/
-    ├── web/frames/                 # Front 원본
-    ├── phone/frames/               # Side 원본
-    ├── training.csv
-    ├── evaluation.csv
-    └── webeyetrack/inputs.csv      # valid, head_vector, face_origin
+Participants/
+└── <subject>/<session>/
+    └── feature_maps/
+        ├── web/frames/                 # Front 원본
+        ├── phone/frames/               # Side 원본
+        ├── training.csv
+        ├── evaluation.csv
+        └── webeyetrack/inputs.csv      # valid, head_vector, face_origin
 ```
 
-`inputs.csv.valid=0`인 sample은 연결된 Front·Side pair를 함께 제외합니다. Pipeline 내부에서
+`inputs.csv.valid`를 눈 상태의 최종 기준으로 사용합니다. 정확히 `1`이면 눈 뜸(open)으로 사용하고,
+`0`이면 눈 감음(close)으로 판단해 연결된 Front·Side pair를 함께 제외합니다. Pipeline 내부에서
 눈 상태를 다시 계산하지 않습니다. `head_vector [3]`과 `face_origin_3d [3]`도 이 CSV에서 읽습니다.
 
-Side ROI annotation은 별도 CSV로 관리합니다. image-only Side 학습의 필수 열은 다음 네 개입니다.
+현재 기본 측정 데이터는 Front와 Side 모두 이미 만들어진 ROI를 직접 사용합니다.
 
-```csv
-sample_id,visible_eye,visible_eye_bbox_xyxy,eye_annotation_valid
-s000001,right,"[720,280,980,470]",true
+```text
+process_data/
+└── <subject>/<head_down|neutral>/
+    ├── eye_roi/<pair_id>.png                 # Front 128x512
+    ├── side_eye_roi/<원래-phone-frame>.png   # Side 128x128
+    └── inputs.csv
 ```
 
-`visible_eye_bbox_xyxy`는 각 사람·frame의 실제 눈 bbox입니다. Bbox를 원본 경계 안에서 자른 뒤
-바로 `128×256`으로 resize하므로 사람마다 bbox 크기가 달라도 최종 shape은 같고 검은 padding은
-생기지 않습니다.
+ROI는 `128×128`을 기준으로 처리합니다. 한 픽셀이라도 크면 중앙 crop하고, 작으면 검정색으로
+중앙 padding합니다. 이 과정에는 resize/interpolation이 없습니다. 완성된 `128×128` ROI는
+`128×256` 검정 canvas의 중앙 `x=64:192`에 배치하고 `[0,1]` float32로 정규화합니다.
 
-눈꺼풀 6점, iris, Side head anchor가 있으면 아래 선택형 feature도 같은 CSV에 추가할 수 있습니다.
-자세한 열과 pairing 규칙은 [데이터 형식](docs/dataset-format.md)을 참고하세요.
-
-현재 DB의 `head_down`·`neutral`에는 810 pair가 있고 `inputs.csv.valid=1`로 승인된 pair는
-809개입니다. 현재 preview용 Side bbox는 2개뿐이므로 전체 학습은 나머지 807개의 검수된 bbox를
-추가한 뒤 가능합니다. `measured-manifest`와 `measured-train`은 누락 annotation이 있으면 의도적으로
-중단하며 더미 bbox로 계속 학습하지 않습니다.
+`eye_roi`는 기존 `Participants/.../webeyetrack/eye_roi`와 전 파일 hash/pixel 비교 후 그대로
+`128×512` 모델 입력으로 사용합니다. `side_eye_roi`는 `128×256` 검정 canvas 중앙에 배치합니다.
+`inputs.csv`가 없는 session, `valid=0`, ROI 누락 pair와 품질 검수에서 제외된 session은 학습하지
+않습니다.
 
 ## 설치와 검사
 
@@ -79,88 +112,175 @@ make check
 make webeyetrack-assets
 ```
 
+Windows에서 `make`와 Conda가 없다면 PowerShell용 설치 스크립트를 사용합니다. 먼저 Python 3.12를
+설치하고 그 `python.exe` 경로를 지정합니다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup_windows.ps1 `
+  -PythonPath "C:\path\to\Python312\python.exe" -Dev
+```
+
 외부 데이터와 weight 없이 전체 train/fusion/checkpoint/MLflow 연결을 확인하려면:
 
 ```bash
 make demo-dual-train
 ```
 
-## 최종 학습 순서
+## 전체 학습 파이프라인
 
-아래 경로는 기본값입니다.
+### 1. 데이터 감사와 manifest 생성
 
-```text
-MEASURED_DATA_ROOT = ../project_data/data
-SIDE_ANNOTATIONS   = ../project_data/data/side_annotations.csv
+주 학습 경로는 `process_data/<subject>/<session>/{eye_roi,side_eye_roi,inputs.csv}`입니다. Windows에서는
+다음 스크립트가 전수 이미지 감사, `valid`/pair 검증, quality exclusion 적용, manifest 생성과
+subject-wise split 준비를 순서대로 실행합니다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_process_data_windows.ps1 `
+  -ProcessDataRoot "C:\path\to\process_data" `
+  -ReferenceRoot "C:\path\to\Participants"
 ```
 
-1. manifest, pairing, split을 검사합니다.
+경로 인자를 생략하면 프로젝트의 상위 폴더에서 `process_data`와 `Participants`를 찾습니다.
+`-SkipPrepare`는 감사·manifest·config 검증까지만 다시 실행합니다. 준비 결과는 기본적으로
+`.demo/process_data_audit`에 저장되며 Git에는 포함되지 않습니다.
 
-```bash
-make measured-manifest \
-  SIDE_ANNOTATIONS="/absolute/path/to/side_annotations.csv"
+Manifest 단계에서 다음 sample을 제외합니다.
 
-make measured-prepare \
-  SIDE_ANNOTATIONS="/absolute/path/to/side_annotations.csv"
+- `inputs.csv.valid != 1`
+- Front/Side 중 하나가 없거나 target·subject가 일치하지 않는 pair
+- ROI 파일이 없거나 허용 shape를 만족하지 않는 sample
+- 품질 검수에서 제외된 session
+
+Split은 `subject_id`를 기준으로 `70/15/15`, seed `42`를 사용하여 같은 사람이 여러 split에
+섞이지 않게 합니다. 피험자가 5명이면 사람 단위를 보존하므로 실제 배정은 `3/1/1`입니다.
+
+### 2. Config 병합과 전처리
+
+Base config 위에 데이터·전처리·모델 profile을 순서대로 병합하고, CLI override를 마지막에
+적용합니다. 정확한 병합 순서는 아래 [설정 조합과 실험 변경](#설정-조합과-실험-변경)에 있습니다.
+
+Front ROI는 `128×512` 그대로 사용합니다. Side ROI는 중앙 crop/padding으로 `128×128`을 만든 뒤
+`128×256` 검정 canvas 중앙에 배치합니다. Train split에만 좌우 반전과 color jitter를 적용하며,
+결정적 전처리 결과는 sample별 `.pkl` cache로 재사용할 수 있습니다.
+
+### 3. 모델 학습
+
+`process_data` profile의 기본 학습 조건은 다음과 같습니다.
+
+| 항목 | 값 |
+|---|---|
+| 최대 epoch | `50` |
+| Early stopping | validation 10회 연속 미개선, `min_delta=0.0005` |
+| Batch size | `8` |
+| Optimizer | AdamW, `lr=1e-4`, `weight_decay=1e-4` |
+| Scheduler | ReduceLROnPlateau, factor `0.5`, patience `3`, min LR `1e-6` |
+| Primary loss | Huber (`delta=0.05`), axis weight `x=1`, `y=2` |
+| Auxiliary loss | 3×3 grid boundary loss `0.5`; dual-view Side residual loss `1.0` |
+| Best 기준 | `val/subject_macro_same_cell_rate_3x3`, mode `max` |
+| 재현성 | seed `42`, deterministic mode |
+
+PowerShell에서 `process_data`를 직접 학습하는 예시는 다음과 같습니다. 마지막 profile만 바꾸면
+Side encoder를 교체할 수 있습니다.
+
+```powershell
+$env:PROCESS_DATA_ROOT = "C:\path\to\process_data"
+$env:PROCESS_DATA_MANIFEST = ".demo\process_data_audit\manifest.csv"
+$env:GAZE_OUTPUT_ROOT = ".demo\process_data_training\outputs"
+$env:MLFLOW_TRACKING_URI = "sqlite:///./.demo/process_data_training/mlflow.db"
+
+$profiles = @(
+  "configs/profiles/blazegaze.yaml",
+  "configs/profiles/front_precomputed_eye_roi.yaml",
+  "configs/profiles/side_profile_90.yaml",
+  "configs/profiles/side_precomputed_roi.yaml",
+  "configs/profiles/process_data.yaml",
+  "configs/models/front_webeyetrack.yaml",
+  "configs/models/side_blazegaze_transfer.yaml"
+)
+$profileArgs = foreach ($profile in $profiles) { "--profile"; $profile }
+
+& .venv\Scripts\python.exe -m gaze_pipeline train `
+  --config configs/config.yaml @profileArgs
 ```
 
-피험자 단위로 무작위 분할하며 기본 비율은 `70/15/15`, seed는 `42`입니다. 피험자가 5명이면
-한 사람을 나누지 않기 때문에 실제 배정은 `3/1/1`, 즉 `60/20/20`이 됩니다.
+MobileNetV4를 사용하려면 마지막 항목을 `configs/models/side_mobilenet_v4.yaml`로 교체합니다.
+Front-only 통제군은 모든 Side profile 뒤에
+`configs/profiles/process_data_subjectwise_front_only.yaml`을 추가합니다.
 
-2. 실제 전처리를 그림으로 확인합니다.
+기존 `Participants + 외부 Side ROI` 데이터 구조는 다음 wrapper로 재현할 수 있습니다.
 
-```bash
-make measured-preview \
-  SIDE_ANNOTATIONS="/absolute/path/to/side_annotations.csv"
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_precomputed_side_roi_windows.ps1
 ```
-
-결과는 `outputs/measured_preprocessing_preview/`에 생성됩니다. 기존에 저장된 Front/Side ROI는
-읽지 않고 corrected frame에서 다시 만듭니다.
-
-3. Side 모델 하나를 골라 학습합니다.
 
 ```bash
 make measured-train \
-  SIDE_ANNOTATIONS="/absolute/path/to/side_annotations.csv" \
-  SIDE_MODEL_PROFILE="configs/models/side_mobilenet_v4.yaml" \
-  OVERRIDES="training.max_epochs=100 data.dataloader.batch_size=8"
+  SIDE_MODEL_PROFILE="configs/models/side_blazegaze_transfer.yaml" \
+  OVERRIDES="training.max_epochs=50 data.dataloader.batch_size=8"
 ```
 
-BlazeGaze-transfer Side Encoder를 쓰려면 model profile만 바꿉니다.
+### 4. Checkpoint, 평가와 MLflow
 
-```bash
-make measured-train \
-  SIDE_ANNOTATIONS="/absolute/path/to/side_annotations.csv" \
-  SIDE_MODEL_PROFILE="configs/models/side_blazegaze_transfer.yaml"
+각 epoch에서 validation metric을 기록하고 best checkpoint를 갱신합니다. `best_weights.pt`는
+평가용 weight만, `last_checkpoint.pt`는 optimizer·scheduler·RNG 상태까지 포함하여 재개에
+사용합니다. 학습 종료 시 `final_weights.pt`와 최종 validation summary를 저장합니다.
+
+```powershell
+& .venv\Scripts\python.exe -m gaze_pipeline evaluate `
+  --config configs/config.yaml @profileArgs `
+  --checkpoint "C:\path\to\best_weights.pt" --split test
+
+& .venv\Scripts\mlflow.exe ui `
+  --backend-store-uri $env:MLFLOW_TRACKING_URI --port 5000
 ```
 
-4. 같은 model profile로 결과를 평가하고 MLflow UI를 엽니다.
+브라우저에서 `http://127.0.0.1:5000`을 열면 epoch loss, metric, resolved config, 환경 정보,
+checkpoint SHA-256과 artifact를 확인할 수 있습니다. 이 주소는 로컬 UI이므로 외부 공유 링크가
+아닙니다.
 
-```bash
-make measured-evaluate \
-  CHECKPOINT="/absolute/path/to/best_weights.pt" \
-  EVAL_SPLIT=test \
-  SIDE_MODEL_PROFILE="configs/models/side_mobilenet_v4.yaml"
+## 검증된 학습 이력
 
-make measured-mlflow-ui
-```
+2026-08-25까지 로컬 MLflow에서 `FINISHED` 상태와 checkpoint lineage를 확인한 실행입니다.
+학습 데이터·weight·MLflow DB 자체는 개인정보와 용량 문제로 Git에 포함하지 않고 run ID와
+요약만 기록합니다.
 
-브라우저에서 `http://127.0.0.1:5000`을 열면 epoch loss, metric, config, checkpoint를 볼 수 있습니다.
+| 모델 | Lineage | Train run ID | 완료/best epoch | Best val macro 3×3 | Test run ID |
+|---|---:|---|---:|---:|---|
+| Dual-view + BlazeGaze Side | A | `ddaaca78ad554d5b9a7b60fc499a20c1` | `16 / 6` | `53.03%` | `e100fcfe75e24155a17f9e277f23a28f` |
+| Dual-view + MobileNetV4 Side | B | `7664d32974a84cbaaf08ceba6aaf9a90` | `13 / 3` | `53.48%` | `1d15fd15c07e419ca86fcd83f627e4b9` |
+| BlazeGaze Front-only | A | `fd43712a9596469983c2cdf92c5ba9d1` | `19 / 9` | `52.53%` | `47fa8f5eaf8649139fa39f35a05a7b6c` |
 
-## Config 조합
+| 모델 | Test mean Euclidean ↓ | Test macro 3×3 ↑ | `within 0.05` ↑ | Out of bounds ↓ |
+|---|---:|---:|---:|---:|
+| Dual-view + BlazeGaze Side | `0.1863` | `56.56%` | `9.67%` | `0.47%` |
+| Dual-view + MobileNetV4 Side | `0.2007` | `51.12%` | `7.64%` | `0.62%` |
+| BlazeGaze Front-only | `0.2269` | `46.21%` | `7.80%` | `4.99%` |
 
-Production 순서는 다음과 같습니다. 모델 profile은 반드시 마지막에 둡니다.
+Lineage A의 BlazeGaze Side와 Front-only는 동일한 dataset/split/test hash를 사용하므로 통제 비교가
+가능하며, Side branch가 모든 주요 test 지표를 개선했습니다. MobileNetV4 실행은 다른 dataset
+revision(Lineage B)을 사용했으므로 수치를 직접 우열 비교하기보다 참고 결과로 봐야 합니다.
+
+## 설정 조합과 실험 변경
+
+`process_data` 주 학습 순서는 다음과 같습니다. 모델 profile은 반드시 데이터·전처리 profile 뒤에
+두고, 통제군/ablation profile은 모델 뒤에 둡니다.
 
 ```text
 configs/config.yaml
   → configs/profiles/blazegaze.yaml
+  → configs/profiles/front_precomputed_eye_roi.yaml
   → configs/profiles/side_profile_90.yaml
-  → configs/profiles/side_roi_only.yaml
-  → configs/profiles/measured_head_down_neutral.yaml
+  → configs/profiles/side_precomputed_roi.yaml
+  → configs/profiles/process_data.yaml
   → configs/models/front_webeyetrack.yaml
   → configs/models/<선택한-side-model>.yaml
+  → configs/profiles/<선택한-ablation>.yaml
   → CLI override
 ```
+
+`Participants + 외부 Side ROI` 형식에서는 `front_precomputed_eye_roi.yaml`과 `process_data.yaml` 대신
+`measured_head_down_neutral.yaml`을 사용합니다. 최종 resolved config는 실행 폴더와 MLflow artifact에
+함께 기록됩니다.
 
 ### 모델 교체
 
@@ -287,18 +407,6 @@ augmentation은 pickle에 저장하지 않고 매 epoch cache를 읽은 뒤 다�
 코드를 실행할 수 있으므로 이 cache를 공유·다운로드하지 말고 pipeline이 만든 로컬 폴더에서만
 사용하세요. 전부 다시 만들려면 `preprocessing.cache.mode=refresh`를 한 번 사용합니다.
 같은 cache 폴더에 대해 여러 process가 동시에 `refresh`를 실행하지 마세요.
-
-## 모델 입출력
-
-| Branch | 입력 | 출력 |
-|---|---|---|
-| Front | `front_image [B,3,128,512]`, `front_head_vector [B,3]`, `front_face_origin_3d [B,3]` | `gaze_xy [B,2]` |
-| Side | `side_image [B,3,128,256]` + 선택 feature | `delta_y_side [B,1]`, `side_embedding`, optional `quality` |
-| Fusion | Front `(x,y)` + Side `delta_y` | 최종 `gaze_xy [B,2]` |
-
-좌표는 화면 중심 기준 `[-0.5,0.5]`이며 음수 좌표가 필요하므로 출력에 ReLU를 사용하지 않습니다.
-현재 `quality`에는 별도 target/loss가 없어 head가 학습되지 않으므로 결과 품질 지표로 사용하지
-않습니다.
 
 ## 결과 위치
 

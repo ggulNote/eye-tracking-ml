@@ -288,6 +288,44 @@ def test_augmentation_is_stable_per_seed_sample_and_epoch(tmp_path: Path) -> Non
     assert not torch.equal(next_epoch["front_image"], first_item["front_image"])
 
 
+def test_train_repeat_factor_creates_distinct_virtual_augmentations_only_for_train(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "front.png"
+    _write_image(image_path, color=(180, 120, 90))
+    config = _config()
+    config["data"]["dataloader"]["train_repeat_factor"] = 2
+    config["preprocessing"]["augment"] = {
+        "enabled": True,
+        "apply_to": "train_only",
+        "horizontal_flip_probability": 0.5,
+        "color_jitter": {"enabled": True, "brightness": 0.4},
+    }
+
+    train = GazeImageDataset([_row("repeat", image_path)], config, split="train")
+    validation = GazeImageDataset([_row("repeat", image_path)], config, split="validation")
+
+    assert len(train) == 2
+    assert len(validation) == 1
+    first = train[0]
+    second = train[1]
+    assert first["metadata"]["augmentation_variant"] == 0
+    assert second["metadata"]["augmentation_variant"] == 1
+    assert first["metadata"]["augmentation_repeat_factor"] == 2
+    assert first["metadata"]["augmentation_seed"] != second["metadata"]["augmentation_seed"]
+    assert not torch.equal(first["front_image"], second["front_image"])
+
+
+def test_train_repeat_factor_rejects_non_positive_or_boolean_values(tmp_path: Path) -> None:
+    image_path = tmp_path / "front.png"
+    _write_image(image_path, color=(180, 120, 90))
+    for value in (0, -1, True):
+        config = _config()
+        config["data"]["dataloader"]["train_repeat_factor"] = value
+        with pytest.raises(ManifestError, match="train_repeat_factor"):
+            GazeImageDataset([_row("repeat", image_path)], config, split="train")
+
+
 def test_generated_pair_id_falls_back_from_custom_source_key(tmp_path: Path) -> None:
     front_path = tmp_path / "front.png"
     side_path = tmp_path / "side.png"

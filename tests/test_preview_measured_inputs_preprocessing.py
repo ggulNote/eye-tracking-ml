@@ -151,8 +151,8 @@ def test_discovery_selects_only_inputs_valid_rows_and_corrected_frames(tmp_path:
     assert [sample.subject for sample in samples] == ["person_a", "person_b"]
     assert all(sample.valid for sample in samples)
     assert all("closed" not in sample.sample_id for sample in samples)
-    assert all("feature_maps/web/frames" in str(sample.front_path) for sample in samples)
-    assert all("feature_maps/phone/frames" in str(sample.side_path) for sample in samples)
+    assert all("feature_maps/web/frames" in sample.front_path.as_posix() for sample in samples)
+    assert all("feature_maps/phone/frames" in sample.side_path.as_posix() for sample in samples)
     assert all(sample.side_annotation is None for sample in samples)
 
 

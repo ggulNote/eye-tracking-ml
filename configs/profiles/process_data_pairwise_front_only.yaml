@@ -1,0 +1,29 @@
+# process_data_pairwise와 같은 split/loss/metric 조건에서 BlazeGaze Front만 사용하는 비교군입니다.
+# 모든 Side 관련 profile과 model profile 뒤에 마지막으로 적용합니다.
+
+experiment:
+  name: process_data_pairwise_front_only
+  description: "pair_id split에서 BlazeGaze Front-only controlled baseline"
+  tags:
+    split_unit: pair_id
+    subject_wise: false
+    ablation: front_only
+    side_encoder: disabled
+
+preprocessing:
+  branch_overrides:
+    side:
+      enabled: false
+
+model:
+  side:
+    enabled: false
+
+fusion:
+  enabled: false
+
+loss:
+  branch_auxiliary:
+    enabled: false
+    front_weight: 0.0
+    side_weight: 0.0

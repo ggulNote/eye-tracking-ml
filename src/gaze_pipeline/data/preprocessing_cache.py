@@ -423,7 +423,12 @@ class TrustedLocalPreprocessingCache:
         )
         temporary = Path(temporary_name)
         try:
-            os.fchmod(descriptor, 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o600)
+            else:
+                # Windows has no fchmod; chmod still applies its supported
+                # read/write protection to this just-created private file.
+                os.chmod(temporary, stat.S_IREAD | stat.S_IWRITE)
             with os.fdopen(descriptor, "wb", closefd=False) as stream:
                 stream.write(content)
                 stream.flush()

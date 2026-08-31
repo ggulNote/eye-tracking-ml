@@ -21,7 +21,7 @@ flowchart LR
     DB["corrected dual-view DB"] --> M["Manifest · Pairing"]
     M --> S["Subject-wise Split"]
     S --> F["Front ROI · precomputed 3D pose"]
-    S --> P["Side eye bbox crop · stretch resize"]
+    S --> P["Side eye bbox crop · aspect-preserving letterbox"]
     F --> C["Deterministic .pkl cache"]
     P --> C
     C --> FM["WebEyeTrack Front"]
@@ -45,7 +45,7 @@ Config는 앞에서 뒤로 덮어씁니다. 모델 profile은 마지막에 둡�
 configs/config.yaml
   → configs/profiles/blazegaze.yaml
   → configs/profiles/side_profile_90.yaml
-  → configs/profiles/side_roi_only.yaml
+  → configs/profiles/side_precomputed_roi.yaml
   → configs/profiles/measured_head_down_neutral.yaml
   → configs/models/front_webeyetrack.yaml
   → configs/models/<selected-side-model>.yaml
@@ -109,20 +109,17 @@ front_gaze_valid:     bool[B]  # pose/landmark/ROI 품질 mask
 
 ### Side
 
-image-only 학습의 최소 annotation은 frame별 `visible_eye_bbox_xyxy`입니다.
-[`side_roi_only.yaml`](../configs/profiles/side_roi_only.yaml)은 bbox를 원본 경계 안에서 자른 뒤
-`128×256`으로 직접 resize합니다.
+image-only Side 학습은 외부에서 만든 `side_eye_roi` 이미지를 직접 읽습니다.
+[`side_precomputed_roi.yaml`](../configs/profiles/side_precomputed_roi.yaml)이 크기를 맞춥니다.
 
 ```text
-corrected phone frame
-→ 사람·frame별 eye bbox crop
-→ direct stretch resize 128×256
+precomputed Side eye ROI
+→ center crop/pad 128×128 (no resampling)
+→ black canvas center placement 128×256
 → RGB float32 CHW [0,1]
 ```
 
-이 방식은 종횡비를 보존하지 않지만 검은 letterbox padding을 만들지 않으며, 서로 다른 크기의
-bbox도 같은 `side_image [B,3,128,256]` 계약으로 만듭니다. Bbox는 실제 frame에서 추출·검수한
-값이어야 하며 피험자 공통 고정 좌표나 더미 좌표를 사용하지 않습니다.
+이 방식은 ROI 픽셀을 resize하지 않고 동일한 `side_image [B,3,128,256]` 계약으로 만듭니다.
 
 추가 annotation이 있으면 다음 feature를 선택할 수 있습니다.
 

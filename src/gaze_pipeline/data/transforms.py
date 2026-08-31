@@ -478,6 +478,57 @@ def letterbox_resize(
     return canvas, matrix
 
 
+def center_crop_pad_precomputed_roi(
+    image: np.ndarray,
+    *,
+    content_size_hw: tuple[int, int] = (128, 128),
+    output_size_hw: tuple[int, int] = (128, 256),
+    pad_rgb: tuple[int, int, int] = (0, 0, 0),
+) -> np.ndarray:
+    """Center-crop/pad an ROI without resampling, then center it on the output canvas."""
+
+    source = np.asarray(image)
+    if source.ndim != 3 or source.shape[2] != 3:
+        raise SampleValidationError("precomputed Side ROI must have RGB shape [H,W,3]")
+    source_height, source_width = source.shape[:2]
+    content_height, content_width = content_size_hw
+    output_height, output_width = output_size_hw
+    if min(source_height, source_width, content_height, content_width) <= 0:
+        raise SampleValidationError("precomputed Side ROI sizes must be positive")
+    if output_height < content_height or output_width < content_width:
+        raise TransformConfigError(
+            "precomputed Side ROI output_size_hw must contain content_size_hw"
+        )
+
+    crop_height = min(source_height, content_height)
+    crop_width = min(source_width, content_width)
+    source_top = (source_height - crop_height) // 2
+    source_left = (source_width - crop_width) // 2
+    cropped = source[
+        source_top : source_top + crop_height,
+        source_left : source_left + crop_width,
+    ]
+
+    content = np.empty((content_height, content_width, 3), dtype=np.uint8)
+    content[...] = np.asarray(pad_rgb, dtype=np.uint8)
+    content_top = (content_height - crop_height) // 2
+    content_left = (content_width - crop_width) // 2
+    content[
+        content_top : content_top + crop_height,
+        content_left : content_left + crop_width,
+    ] = cropped
+
+    output = np.empty((output_height, output_width, 3), dtype=np.uint8)
+    output[...] = np.asarray(pad_rgb, dtype=np.uint8)
+    output_top = (output_height - content_height) // 2
+    output_left = (output_width - content_width) // 2
+    output[
+        output_top : output_top + content_height,
+        output_left : output_left + content_width,
+    ] = content
+    return np.ascontiguousarray(output)
+
+
 def _crop_from_landmarks(
     image: np.ndarray,
     landmarks: np.ndarray,
@@ -686,12 +737,22 @@ class OrderedGazePreprocessor:
             dependent_config = _mapping(self.config.get(dependent), name=dependent)
             if not _enabled(dependent_config):
                 continue
-            if dependent == "eye_region_warp" and str(
-                dependent_config.get("method", "landmark_homography")
-            ).lower() in {
+            method = str(dependent_config.get("method", "landmark_homography")).lower()
+            source = str(dependent_config.get("source", "reconstruct")).lower()
+            if dependent == "metric_head_pose" and source in {
+                "precomputed",
+                "precomputed_only",
+            }:
+                continue
+            if dependent == "eye_region_warp" and method in {
                 "profile90_annotation",
                 "profile_annotation",
                 "annotation_eye_bbox",
+                "precomputed_side_roi",
+                "precomputed_front_eye_roi",
+                "precomputed_eye_roi",
+                "direct_side_roi",
+                "direct_front_eye_roi",
             }:
                 continue
             landmark_config = _mapping(self.config.get("face_landmarks"), name="face_landmarks")
@@ -1306,6 +1367,48 @@ class OrderedGazePreprocessor:
             metadata["representation"] = "invalid_eye_patch"
             _mark_gaze_invalid(sample, f"eye_region_warp:{reason}")
             return True
+
+        if method in {
+            "precomputed_side_roi",
+            "precomputed_front_eye_roi",
+            "precomputed_eye_roi",
+            "direct_side_roi",
+            "direct_front_eye_roi",
+        }:
+            image = np.asarray(sample["image"])
+            content_size = _as_size_hw(
+                config.get("content_size_hw", [128, 128]),
+                name="eye_region_warp.content_size_hw",
+            )
+            output_size = _as_size_hw(
+                config.get("size_hw", [128, 256]),
+                name="eye_region_warp.size_hw",
+            )
+            try:
+                sample["image"] = center_crop_pad_precomputed_roi(
+                    image,
+                    content_size_hw=content_size,
+                    output_size_hw=output_size,
+                    pad_rgb=_as_rgb_triplet(
+                        config.get("pad_rgb", [0, 0, 0]),
+                        name="eye_region_warp.pad_rgb",
+                    ),
+                )
+            except (SampleValidationError, TransformConfigError, ValueError) as exc:
+                if mark_invalid_warp(str(exc), output_size):
+                    return
+                _handle_failure("eye_region_warp", config, str(exc))
+                return
+            metadata = _metadata(sample)
+            metadata["eye_region_warp_valid"] = True
+            metadata["eye_selection_valid"] = True
+            if method in {"precomputed_front_eye_roi", "direct_front_eye_roi"}:
+                metadata["representation"] = "precomputed_front_eye_roi_passthrough_v1"
+            else:
+                metadata["representation"] = "precomputed_side_roi_center_crop_pad_v1"
+            metadata["precomputed_roi_source_size_hw"] = np.asarray(image.shape[:2], dtype=np.int32)
+            metadata["precomputed_roi_content_size_hw"] = np.asarray(content_size, dtype=np.int32)
+            return
 
         if method in {
             "profile90_annotation",
@@ -1948,6 +2051,7 @@ __all__ = [
     "SampleValidationError",
     "TransformConfigError",
     "TransformDependencyError",
+    "center_crop_pad_precomputed_roi",
     "letterbox_resize",
     "transform_points",
 ]

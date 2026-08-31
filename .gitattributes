@@ -9,4 +9,3 @@
 *.ckpt binary
 *.safetensors binary
 *.onnx binary
-

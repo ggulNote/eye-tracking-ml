@@ -1,0 +1,20 @@
+# Pair-wise 학습에서 공식 WebEyeTrack BlazeGaze convolution encoder를
+# 변환한 PyTorch 가중치로 Side branch를 초기화합니다.
+# 이 profile은 side_blazegaze_transfer.yaml 뒤에 적용합니다.
+
+experiment:
+  tags:
+    side_encoder: blazegaze_transfer
+    side_encoder_initialization: converted_webeyetrack
+
+model:
+  side:
+    init_args:
+      encoder_weights_path: "${oc.env:BLAZEGAZE_SIDE_ENCODER_WEIGHTS,./models/blazegaze_side_encoder.pt}"
+    initialization:
+      mode: converted_webeyetrack_encoder
+      source_framework: pytorch
+      path: "${oc.env:BLAZEGAZE_SIDE_ENCODER_WEIGHTS,./models/blazegaze_side_encoder.pt}"
+      load_scope: convolution_depthwise_batchnorm_encoder
+      reinitialize: [flatten_projection, auxiliary_projector, output_head]
+      importer_entrypoint: null
